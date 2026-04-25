@@ -179,7 +179,7 @@ export default function Settings() {
             onClick={handleSave}
             disabled={saving}
             className="flex items-center gap-2 px-6 py-2.5 bg-white text-black text-sm font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50"
-            data-testid="save-settings-btn"
+            data-testid="settings-save-btn"
           >
             {saving ? (
               <span className="text-sm">Saving...</span>

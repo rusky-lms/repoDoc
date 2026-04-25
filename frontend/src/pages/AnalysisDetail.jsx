@@ -23,7 +23,7 @@ function StatusBadge({ status }) {
     failed: "text-red-400 border-red-700 bg-red-900/20",
   };
   return (
-    <span className={`text-xs font-mono px-2 py-1 border ${map[status] || map.queued}`} data-testid="analysis-status">
+    <span className={`text-xs font-mono px-2 py-1 border ${map[status] || map.queued}`} data-testid="status-badge">
       {status}
     </span>
   );
