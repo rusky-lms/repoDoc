@@ -18,7 +18,7 @@ export default function NavBar() {
           <GitBranch size={14} className="text-black" strokeWidth={2.5} />
         </div>
         <span className="font-[Chivo] font-bold text-white tracking-tight">
-          RepoDoctor
+          repoDoc
         </span>
       </Link>
 

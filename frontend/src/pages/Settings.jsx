@@ -86,7 +86,7 @@ export default function Settings() {
         {/* GitHub Settings */}
         <SettingSection
           title="GitHub Integration"
-          description="Required for creating Pull Requests. Your PAT must have Contents and Pull Requests read/write permissions."
+            description="Required for creating Pull Requests. Your PAT must have Contents and Pull Requests read/write permissions."
         >
           <div className="space-y-3">
             <div>

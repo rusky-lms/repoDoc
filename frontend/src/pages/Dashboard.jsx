@@ -87,7 +87,7 @@ export default function Dashboard() {
       {/* Header */}
       <div className="flex items-center justify-between mb-8">
         <div>
-          <h1 className="text-4xl font-[Chivo] font-bold text-white tracking-tight">RepoDoctor</h1>
+          <h1 className="text-4xl font-[Chivo] font-bold text-white tracking-tight">repoDoc</h1>
           <p className="text-zinc-500 text-sm mt-1">Autonomous bug detection & fixing agent</p>
         </div>
         <button
@@ -141,9 +141,9 @@ export default function Dashboard() {
         {error && (
           <p className="text-red-400 text-xs font-mono mt-2" data-testid="analyze-error">{error}</p>
         )}
-        <p className="text-zinc-600 text-xs font-mono mt-3">
-          Supports public GitHub repos. Detects failing tests, lint errors &amp; logical bugs.
-        </p>
+          <p className="text-zinc-600 text-xs font-mono mt-3">
+            Supports public GitHub repos. Detects failing tests, lint errors &amp; logical bugs.
+          </p>
       </div>
 
       {/* Running / Recent */}

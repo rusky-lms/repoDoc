@@ -6,7 +6,7 @@ from emergentintegrations.llm.chat import LlmChat, UserMessage
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """You are RepoDoctor, an autonomous AI bug-fixing agent. You:
+SYSTEM_PROMPT = """You are repoDoc, an autonomous AI bug-fixing agent. You:
 - Analyze GitHub repositories for bugs (failing tests, lint errors, logical issues)
 - Generate minimal code fixes using Gemini AI
 - Verify fixes by re-running tests
@@ -127,14 +127,14 @@ class TelegramService:
                         if repo_url:
                             await self.send_message(
                                 chat_id,
-                                f"<b>RepoDoctor</b> starting analysis...\n\n<code>{repo_url}</code>"
+                                f"<b>repoDoc</b> starting analysis...\n\n<code>{repo_url}</code>"
                             )
                             asyncio.create_task(trigger_analysis_fn(repo_url, chat_id))
 
                     elif text in ("/start", "/help"):
                         await self.send_message(
                             chat_id,
-                            "<b>RepoDoctor Bot</b>\n\n"
+                            "<b>repoDoc Bot</b>\n\n"
                             "I autonomously find and fix bugs in GitHub repos.\n\n"
                             "<b>Commands:</b>\n"
                             "<code>/analyze https://github.com/user/repo</code> — start analysis\n"

@@ -366,7 +366,7 @@ async def verify_fix_for_test(bug: dict, repo_dir: str, strategy: dict) -> bool:
 async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
                             telegram_svc=None, github_svc=None, telegram_chat_id: Optional[str] = None):
     """Main agentic loop: observe → decide → act → verify → create_pr"""
-    repo_dir = f"/tmp/repodoctor/{analysis_id}"
+    repo_dir = f"/tmp/repodoc/{analysis_id}"
 
     async def add_log(msg: str, level: str = "info"):
         entry = {"timestamp": utc_now(), "level": level, "message": msg}
@@ -389,7 +389,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         )
 
     try:
-        os.makedirs("/tmp/repodoctor", exist_ok=True)
+        os.makedirs("/tmp/repodoc", exist_ok=True)
 
         # ── STEP 1: OBSERVE ──────────────────────────────────────────────────
         await db.analyses.update_one({"id": analysis_id}, {"$set": {"status": "cloning"}})
