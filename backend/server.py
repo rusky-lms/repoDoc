@@ -15,6 +15,8 @@ from models import Analysis, AnalysisCreate, Settings
 from agent import run_analysis_task
 from telegram_service import TelegramService
 from github_service import GitHubService
+from watcher_service import WatcherService
+import guardrails_service as gs_mod
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -32,16 +34,36 @@ logger = logging.getLogger(__name__)
 # Global services
 telegram_svc: Optional[TelegramService] = None
 github_svc: Optional[GitHubService] = None
+watcher_svc: Optional[WatcherService] = None
 _telegram_task = None
 _gh_comment_task = None
+_watcher_task = None
 
 
 def get_llm_key():
     return os.environ.get("EMERGENT_LLM_KEY", "")
 
 
+async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional[str] = None,
+                        seed_bugs: Optional[list] = None, watch_event_id: Optional[str] = None,
+                        telegram_chat_id: Optional[str] = None):
+    """Wrapper that injects current service refs into the agent."""
+    await run_analysis_task(
+        analysis_id=analysis_id,
+        repo_url=repo_url,
+        db=db,
+        llm_key=get_llm_key(),
+        telegram_svc=telegram_svc,
+        github_svc=github_svc,
+        telegram_chat_id=telegram_chat_id,
+        target_branch=target_branch,
+        seed_bugs=seed_bugs,
+        watch_event_id=watch_event_id,
+    )
+
+
 async def init_services():
-    global telegram_svc, github_svc, _telegram_task, _gh_comment_task
+    global telegram_svc, github_svc, watcher_svc, _telegram_task, _gh_comment_task, _watcher_task
     settings = await db.settings.find_one({"id": "global"})
 
     gh_token = (settings or {}).get("github_token") or os.environ.get("GITHUB_TOKEN", "")
@@ -59,6 +81,20 @@ async def init_services():
         telegram_svc = TelegramService(tg_token)
         _telegram_task = asyncio.create_task(
             telegram_svc.start_polling(db, trigger_analysis_from_telegram, llm_key=get_llm_key())
+        )
+
+    # Start the continuous repo watcher (runs always; no-op if no watched repos)
+    if watcher_svc is None:
+        watcher_svc = WatcherService()
+    if _watcher_task is None or _watcher_task.done():
+        _watcher_task = asyncio.create_task(
+            watcher_svc.start(
+                db,
+                lambda: github_svc,
+                lambda: telegram_svc,
+                _agent_runner,
+                get_llm_key,
+            )
         )
 
 
@@ -85,11 +121,13 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _telegram_task, _gh_comment_task
+    global _telegram_task, _gh_comment_task, _watcher_task
     if _telegram_task:
         _telegram_task.cancel()
     if _gh_comment_task:
         _gh_comment_task.cancel()
+    if _watcher_task:
+        _watcher_task.cancel()
     client.close()
 
 
@@ -247,6 +285,149 @@ async def save_settings(body: dict):
 @api_router.get("/health")
 async def health():
     return {"status": "ok", "telegram": telegram_svc is not None, "github": github_svc is not None}
+
+
+# ── Guardrails Routes ─────────────────────────────────────────────────────────
+
+@api_router.get("/guardrails/builtin")
+async def list_builtin_guardrails():
+    return {
+        "rules": gs_mod.BUILTIN_RULES,
+        "presets": [
+            {"key": k, **v} for k, v in gs_mod.PRESET_TEMPLATES.items()
+        ],
+    }
+
+
+@api_router.post("/guardrails/from-preset")
+async def create_guardrails_from_preset(body: dict):
+    preset_key = body.get("preset", "startup")
+    template = gs_mod.build_guardrails_from_preset(preset_key)
+    from models import Guardrails
+    gr = Guardrails(
+        name=body.get("name") or template["name"],
+        description=template["description"],
+        rules=template["rules"],
+    )
+    doc = gr.model_dump()
+    await db.guardrails.insert_one(dict(doc))
+    return doc
+
+
+@api_router.get("/guardrails")
+async def list_guardrails():
+    docs = await db.guardrails.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+    return docs
+
+
+@api_router.get("/guardrails/{gid}")
+async def get_guardrails(gid: str):
+    doc = await db.guardrails.find_one({"id": gid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Guardrails not found")
+    return doc
+
+
+@api_router.post("/guardrails")
+async def create_guardrails(body: dict):
+    from models import Guardrails
+    gr = Guardrails(
+        name=body.get("name", "Custom Ruleset"),
+        description=body.get("description", ""),
+        rules=body.get("rules", []),
+    )
+    doc = gr.model_dump()
+    await db.guardrails.insert_one(dict(doc))
+    return doc
+
+
+@api_router.put("/guardrails/{gid}")
+async def update_guardrails(gid: str, body: dict):
+    body.pop("_id", None)
+    body["updated_at"] = datetime.now(timezone.utc).isoformat()
+    result = await db.guardrails.update_one({"id": gid}, {"$set": body})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Guardrails not found")
+    return await db.guardrails.find_one({"id": gid}, {"_id": 0})
+
+
+@api_router.delete("/guardrails/{gid}")
+async def delete_guardrails(gid: str):
+    await db.guardrails.delete_one({"id": gid})
+    # Detach from any watched repos
+    await db.watched_repos.update_many({"guardrails_id": gid}, {"$set": {"guardrails_id": None}})
+    return {"message": "Deleted"}
+
+
+# ── Watched Repos Routes ──────────────────────────────────────────────────────
+
+@api_router.get("/watched-repos")
+async def list_watched_repos():
+    docs = await db.watched_repos.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+    return docs
+
+
+@api_router.post("/watched-repos")
+async def add_watched_repo(body: dict):
+    from models import WatchedRepo
+    wr = WatchedRepo(
+        repo_url=body.get("repo_url", ""),
+        telegram_chat_id=body.get("telegram_chat_id", "") or "",
+        guardrails_id=body.get("guardrails_id"),
+    )
+    if not wr.repo_url:
+        raise HTTPException(status_code=400, detail="repo_url required")
+    # Pre-fill repo_name
+    try:
+        owner = wr.repo_url.rstrip("/").split("/")[-2]
+        name = wr.repo_url.rstrip("/").split("/")[-1].replace(".git", "")
+        wr.repo_name = f"{owner}/{name}"
+    except Exception:
+        pass
+    doc = wr.model_dump()
+    await db.watched_repos.insert_one(dict(doc))
+    return doc
+
+
+@api_router.put("/watched-repos/{wid}")
+async def update_watched_repo(wid: str, body: dict):
+    body.pop("_id", None)
+    body.pop("id", None)
+    result = await db.watched_repos.update_one({"id": wid}, {"$set": body})
+    if result.matched_count == 0:
+        raise HTTPException(status_code=404, detail="Watched repo not found")
+    return await db.watched_repos.find_one({"id": wid}, {"_id": 0})
+
+
+@api_router.delete("/watched-repos/{wid}")
+async def delete_watched_repo(wid: str):
+    await db.watched_repos.delete_one({"id": wid})
+    return {"message": "Deleted"}
+
+
+@api_router.post("/watched-repos/{wid}/check-now")
+async def check_watched_repo_now(wid: str):
+    """Force an immediate watcher pass for a single repo."""
+    watched = await db.watched_repos.find_one({"id": wid}, {"_id": 0})
+    if not watched:
+        raise HTTPException(status_code=404, detail="Watched repo not found")
+    if not github_svc:
+        raise HTTPException(status_code=400, detail="GitHub token not configured")
+    if watcher_svc is None:
+        raise HTTPException(status_code=400, detail="Watcher not initialized")
+    asyncio.create_task(
+        watcher_svc.check_repo(watched, db, github_svc, telegram_svc, _agent_runner, get_llm_key())
+    )
+    return {"message": "Check triggered"}
+
+
+@api_router.get("/watch-events")
+async def list_watch_events(watched_repo_id: Optional[str] = None, limit: int = 50):
+    q = {}
+    if watched_repo_id:
+        q["watched_repo_id"] = watched_repo_id
+    docs = await db.watch_events.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)
+    return docs
 
 
 app.include_router(api_router)

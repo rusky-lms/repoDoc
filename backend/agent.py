@@ -364,8 +364,16 @@ async def verify_fix_for_test(bug: dict, repo_dir: str, strategy: dict) -> bool:
 
 
 async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
-                            telegram_svc=None, github_svc=None, telegram_chat_id: Optional[str] = None):
-    """Main agentic loop: observe → decide → act → verify → create_pr"""
+                            telegram_svc=None, github_svc=None, telegram_chat_id: Optional[str] = None,
+                            target_branch: Optional[str] = None,
+                            seed_bugs: Optional[list] = None,
+                            watch_event_id: Optional[str] = None):
+    """Main agentic loop: observe → decide → act → verify → create_pr.
+
+    target_branch: when set, clone that branch and target the fix PR back at it.
+    seed_bugs: pre-detected bugs (e.g., guardrail violations); when present, skip pytest/flake8.
+    watch_event_id: when set, link the resulting analysis back to a WatchEvent.
+    """
     repo_dir = f"/tmp/repodoc/{analysis_id}"
 
     async def add_log(msg: str, level: str = "info"):
@@ -394,13 +402,13 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         # ── STEP 1: OBSERVE ──────────────────────────────────────────────────
         await db.analyses.update_one({"id": analysis_id}, {"$set": {"status": "cloning"}})
         await update_step("observe", "active", "Cloning repository...")
-        await add_log(f"Cloning {repo_url}...")
+        await add_log(f"Cloning {repo_url}{f' [branch: {target_branch}]' if target_branch else ''}...")
 
-        code, stdout, stderr = await run_cmd(
-            ["git", "clone", "--depth=1", repo_url, repo_dir],
-            cwd="/tmp",
-            timeout=90,
-        )
+        clone_cmd = ["git", "clone", "--depth=1"]
+        if target_branch:
+            clone_cmd += ["-b", target_branch]
+        clone_cmd += [repo_url, repo_dir]
+        code, stdout, stderr = await run_cmd(clone_cmd, cwd="/tmp", timeout=90)
         if code != 0:
             raise Exception(f"Clone failed: {stderr[:300]}")
 
@@ -431,50 +439,54 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         await update_step("act", "active", "Running tests and lint...")
         bugs = []
 
-        # Install Python deps if available (best effort)
-        if file_map["language"] == "python" and file_map["has_requirements"]:
-            await add_log("Installing Python dependencies...")
-            await run_cmd(
-                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet", "--disable-pip-version-check"],
-                cwd=repo_dir,
-                timeout=120,
-            )
-
-        # Run tests
-        if strategy.get("test_cmd"):
-            await add_log(f"Running {strategy['test_cmd']} tests...")
-            if strategy["language"] == "python":
-                test_code, test_out, test_err = await run_cmd(
-                    [sys.executable, "-m", "pytest"] + strategy["test_args"],
+        if seed_bugs:
+            bugs.extend(seed_bugs)
+            await add_log(f"Using {len(seed_bugs)} pre-detected guardrail violation(s); skipping test/lint")
+        else:
+            # Install Python deps if available (best effort)
+            if file_map["language"] == "python" and file_map["has_requirements"]:
+                await add_log("Installing Python dependencies...")
+                await run_cmd(
+                    [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet", "--disable-pip-version-check"],
                     cwd=repo_dir,
                     timeout=120,
                 )
-                test_output = test_out + test_err
-                test_bugs = parse_pytest_output(test_output, repo_dir)
-                bugs.extend(test_bugs)
-                test_summary = f"{len(test_bugs)} test failure(s)" if test_bugs else "All tests passing"
-                await add_log(f"Tests: {test_summary}")
 
-        # Run lint
-        if strategy.get("lint_cmd"):
-            await add_log(f"Running {strategy['lint_cmd']}...")
-            if strategy["language"] == "python":
-                lint_cmd_list = [sys.executable, "-m", "flake8"] + strategy["lint_args"]
-                lint_code, lint_out, lint_err = await run_cmd(
-                    lint_cmd_list,
-                    cwd=repo_dir,
-                    timeout=30,
-                )
-                lint_output = lint_out + lint_err
-                lint_lines = len(lint_output.strip().splitlines()) if lint_output.strip() else 0
-                logger.info(f"[{analysis_id[:8]}] flake8 raw: code={lint_code} stdout_lines={len(lint_out.splitlines())} stderr_lines={len(lint_err.splitlines())} stderr='{lint_err[:200]}' first='{lint_out[:80]}'")
-                lint_bugs = parse_flake8_output(lint_output)
-                bugs.extend(lint_bugs[:5])
-                lint_summary = f"{len(lint_bugs)} lint issue(s) (raw:{lint_lines} lines)" if lint_bugs else f"No lint issues (raw:{lint_lines} lines, exit:{lint_code})"
-                await add_log(f"Lint: {lint_summary}")
+            # Run tests
+            if strategy.get("test_cmd"):
+                await add_log(f"Running {strategy['test_cmd']} tests...")
+                if strategy["language"] == "python":
+                    test_code, test_out, test_err = await run_cmd(
+                        [sys.executable, "-m", "pytest"] + strategy["test_args"],
+                        cwd=repo_dir,
+                        timeout=120,
+                    )
+                    test_output = test_out + test_err
+                    test_bugs = parse_pytest_output(test_output, repo_dir)
+                    bugs.extend(test_bugs)
+                    test_summary = f"{len(test_bugs)} test failure(s)" if test_bugs else "All tests passing"
+                    await add_log(f"Tests: {test_summary}")
 
-        if not bugs and file_map["language"] == "unknown":
-            await add_log("Language not supported for automatic analysis. Using LLM static analysis...")
+            # Run lint
+            if strategy.get("lint_cmd"):
+                await add_log(f"Running {strategy['lint_cmd']}...")
+                if strategy["language"] == "python":
+                    lint_cmd_list = [sys.executable, "-m", "flake8"] + strategy["lint_args"]
+                    lint_code, lint_out, lint_err = await run_cmd(
+                        lint_cmd_list,
+                        cwd=repo_dir,
+                        timeout=30,
+                    )
+                    lint_output = lint_out + lint_err
+                    lint_lines = len(lint_output.strip().splitlines()) if lint_output.strip() else 0
+                    logger.info(f"[{analysis_id[:8]}] flake8 raw: code={lint_code} stdout_lines={len(lint_out.splitlines())} stderr_lines={len(lint_err.splitlines())} stderr='{lint_err[:200]}' first='{lint_out[:80]}'")
+                    lint_bugs = parse_flake8_output(lint_output)
+                    bugs.extend(lint_bugs[:5])
+                    lint_summary = f"{len(lint_bugs)} lint issue(s) (raw:{lint_lines} lines)" if lint_bugs else f"No lint issues (raw:{lint_lines} lines, exit:{lint_code})"
+                    await add_log(f"Lint: {lint_summary}")
+
+            if not bugs and file_map["language"] == "unknown":
+                await add_log("Language not supported for automatic analysis. Using LLM static analysis...")
 
         await db.analyses.update_one({"id": analysis_id}, {"$set": {"bugs": bugs, "status": "fixing"}})
         await update_step("act", "completed", f"{len(bugs)} issue(s) found")
@@ -547,10 +559,19 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
             await update_step("create_pr", "active", "Creating GitHub PR...")
             await add_log("Creating GitHub PR...")
             try:
-                pr_url = await github_svc.create_pr(repo_url, repo_dir, analysis_id, fixes)
+                pr_url = await github_svc.create_pr(
+                    repo_url, repo_dir, analysis_id, fixes,
+                    base_branch=target_branch,
+                )
                 await db.analyses.update_one({"id": analysis_id}, {"$set": {"pr_url": pr_url}})
                 await update_step("create_pr", "completed", pr_url)
                 await add_log(f"PR created: {pr_url}")
+                # Link back to WatchEvent if applicable
+                if watch_event_id:
+                    await db.watch_events.update_one(
+                        {"id": watch_event_id},
+                        {"$set": {"pr_url": pr_url, "analysis_id": analysis_id}},
+                    )
             except Exception as e:
                 await update_step("create_pr", "failed", str(e)[:100])
                 await add_log(f"PR creation failed: {str(e)[:100]}", "error")
