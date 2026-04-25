@@ -1,0 +1,86 @@
+{
+  "theme": "dark",
+  "archetype": "4 (Swiss & High-Contrast)",
+  "vibe": "Technical, Objective, Brutalist, High-Contrast Control Room",
+  "colors": {
+    "background": "#0A0A0A",
+    "surface": "#141414",
+    "border": "#27272A",
+    "text": {
+      "primary": "#FFFFFF",
+      "secondary": "#A1A1AA",
+      "muted": "#71717A",
+      "inverse": "#000000"
+    },
+    "accents": {
+      "success": "#4ADE80",
+      "error": "#F87171",
+      "warning": "#FACC15",
+      "primary": "#FFFFFF",
+      "brand": "#4ADE80"
+    }
+  },
+  "typography": {
+    "headings": {
+      "family": "Chivo, sans-serif",
+      "weights": ["700", "900"],
+      "tracking": "tracking-tight",
+      "rules": "Never center by default. Left-align for technical precision. Do not use Inter or Space Grotesk."
+    },
+    "body": {
+      "family": "IBM Plex Sans, sans-serif",
+      "weights": ["400", "500"],
+      "rules": "Use for standard UI text, descriptions, and long-form reading."
+    },
+    "mono": {
+      "family": "JetBrains Mono, monospace",
+      "weights": ["400", "500"],
+      "usage": "CRITICAL: Use for all code snippets, metric numbers, UI labels, timestamps, and GitHub Repo names."
+    }
+  },
+  "layout_and_spacing": {
+    "system": "The Control Room Grid",
+    "dashboard_grid": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4",
+    "card_style": "Flat, 1px solid border (#27272A), zero shadow, max border-radius 0px to 4px (rounded-none or rounded-sm).",
+    "header": "Solid background (#0A0A0A) with hard bottom border (border-zinc-800). No glassmorphism. It must feel like a rigid terminal window.",
+    "density": "High density. Use 2-3x more spacing for macro sections, but tight spacing (gap-2, gap-4) within technical widgets."
+  },
+  "components": {
+    "strategy": "Shadcn UI heavily customized to remove the 'default Vercel' look. Remove shadows entirely. Use square corners (rounded-none).",
+    "buttons": "Flat solid colors. Primary CTA: bg-white text-black hover:bg-zinc-200. Secondary: border border-zinc-800 text-white hover:bg-zinc-800 hover:text-white.",
+    "inputs": "bg-[#141414] border-zinc-800 text-white placeholder:text-zinc-500 focus:ring-1 focus:ring-emerald-400 rounded-none.",
+    "code_diff": "Custom UI required. Font: JetBrains Mono. Removed line: bg-red-900/30 text-red-400. Added line: bg-emerald-900/30 text-emerald-400.",
+    "agent_loop_stepper": "Vertical layout. Active step glowing with drop-shadow-[0_0_8px_rgba(74,222,128,0.5)]. Completed steps: subdued emerald. Pending steps: dark gray.",
+    "data_testid": "MANDATORY on all interactive and key informational elements (buttons, links, form inputs, menus, error messages)."
+  },
+  "motion": {
+    "hover": "Instant color swaps, no bouncy animations. transition-colors duration-200.",
+    "agent_status": "Use subtle animate-pulse for active 'Thinking/Analyzing' states.",
+    "focus": "focus:ring-2 focus:ring-emerald-400 focus:outline-none"
+  },
+  "icons": {
+    "library": "lucide-react",
+    "style": "Technical, clean, 1.5px stroke width. DO NOT over-decorate."
+  },
+  "media": {
+    "image_urls": [
+      {
+        "url": "https://images.unsplash.com/photo-1625838144804-300f3907c110?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1ODR8MHwxfHNlYXJjaHwzfHxkZXZlbG9wZXIlMjBjb2RpbmclMjBkYXJrfGVufDB8fHx8MTc3NzA5OTAxN3ww&ixlib=rb-4.1.0&q=85",
+        "description": "Black flat screen computer monitor in dark room",
+        "category": "auth_background",
+        "instructions": "Use with heavy dark overlay (bg-black/80) if an auth/login page is created. Otherwise, avoid heavy imagery and rely on code aesthetics."
+      }
+    ]
+  },
+  "instructions_to_main_agent": [
+    "1. IMPLEMENTATION: This is a developer tool. The design must be extremely clean, high-contrast, and functional.",
+    "2. THEME: Use pure dark mode. Body background must be #0A0A0A. Do not use gradients or soft shadows.",
+    "3. FONTS: Import and apply Chivo (Headings), IBM Plex Sans (Body), and JetBrains Mono (Code/Metrics) from Google Fonts in index.css.",
+    "4. BORDERS: Rely on 1px solid borders (border-zinc-800) to separate sections, avoiding floating cards where possible. Use the 'Grid Borders' pattern.",
+    "5. CODE DIFFS: Implement a custom UI for code diffs using JetBrains Mono, with classic red/green syntax line highlighting. Do not use generic text for code.",
+    "6. AGENT LOOP: The Live Agent Loop (Observe -> Decide -> Act -> Verify) should be a prominent, glowing vertical stepper. It is the core value prop.",
+    "7. COMPONENTS: Install Shadcn, but override `radius` to `0` in theme config to ensure a rigid, brutalist tech look.",
+    "8. TESTING: Apply `data-testid` to all forms, buttons, links, and status text.",
+    "9. COLORS: Use Tailwind's zinc scale for neutrals. Primary action color is white (#FFFFFF). Success/Fix color is emerald-400 (#4ADE80)."
+  ]
+}
