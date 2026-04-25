@@ -3,6 +3,7 @@ import os
 import re
 import json
 import shutil
+import sys
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -77,7 +78,7 @@ def decide_strategy(file_map: dict) -> dict:
             "test_cmd": "pytest",
             "test_args": ["-x", "--tb=short", "-q", "--no-header"],
             "lint_cmd": "flake8",
-            "lint_args": ["--max-line-length=120", "--select=E,W,F", "--exclude=.git,__pycache__,venv,env", "."],
+            "lint_args": ["--max-line-length=79", "--select=E,W,F,C", "--exclude=.git,__pycache__,venv,env,migrations,dist", "."],
         }
     elif lang in ("javascript", "typescript"):
         return {
@@ -354,7 +355,7 @@ async def verify_fix_for_test(bug: dict, repo_dir: str, strategy: dict) -> bool:
     
     if strategy["language"] == "python":
         code, stdout, stderr = await run_cmd(
-            ["python", "-m", "pytest", "-x", "--tb=short", "-q", f"::{test_name}"],
+            [sys.executable, "-m", "pytest", "-x", "--tb=short", "-q", f"::{test_name}"],
             cwd=repo_dir,
             timeout=30,
         )
@@ -434,7 +435,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         if file_map["language"] == "python" and file_map["has_requirements"]:
             await add_log("Installing Python dependencies...")
             await run_cmd(
-                ["pip", "install", "-r", "requirements.txt", "--quiet", "--disable-pip-version-check"],
+                [sys.executable, "-m", "pip", "install", "-r", "requirements.txt", "--quiet", "--disable-pip-version-check"],
                 cwd=repo_dir,
                 timeout=120,
             )
@@ -444,7 +445,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
             await add_log(f"Running {strategy['test_cmd']} tests...")
             if strategy["language"] == "python":
                 test_code, test_out, test_err = await run_cmd(
-                    ["python", "-m", "pytest"] + strategy["test_args"],
+                    [sys.executable, "-m", "pytest"] + strategy["test_args"],
                     cwd=repo_dir,
                     timeout=120,
                 )
@@ -458,15 +459,18 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         if strategy.get("lint_cmd"):
             await add_log(f"Running {strategy['lint_cmd']}...")
             if strategy["language"] == "python":
+                lint_cmd_list = [sys.executable, "-m", "flake8"] + strategy["lint_args"]
                 lint_code, lint_out, lint_err = await run_cmd(
-                    ["python", "-m", "flake8"] + strategy["lint_args"],
+                    lint_cmd_list,
                     cwd=repo_dir,
                     timeout=30,
                 )
                 lint_output = lint_out + lint_err
+                lint_lines = len(lint_output.strip().splitlines()) if lint_output.strip() else 0
+                logger.info(f"[{analysis_id[:8]}] flake8 raw: code={lint_code} stdout_lines={len(lint_out.splitlines())} stderr_lines={len(lint_err.splitlines())} stderr='{lint_err[:200]}' first='{lint_out[:80]}'")
                 lint_bugs = parse_flake8_output(lint_output)
                 bugs.extend(lint_bugs[:5])
-                lint_summary = f"{len(lint_bugs)} lint issue(s)" if lint_bugs else "No lint issues"
+                lint_summary = f"{len(lint_bugs)} lint issue(s) (raw:{lint_lines} lines)" if lint_bugs else f"No lint issues (raw:{lint_lines} lines, exit:{lint_code})"
                 await add_log(f"Lint: {lint_summary}")
 
         if not bugs and file_map["language"] == "unknown":

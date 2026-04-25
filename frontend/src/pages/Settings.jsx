@@ -86,7 +86,7 @@ export default function Settings() {
         {/* GitHub Settings */}
         <SettingSection
           title="GitHub Integration"
-          description="Required for creating Pull Requests. Generate a PAT at github.com/settings/tokens with 'repo' scope."
+          description="Required for creating Pull Requests. Your PAT must have Contents and Pull Requests read/write permissions."
         >
           <div className="space-y-3">
             <div>
@@ -98,7 +98,7 @@ export default function Settings() {
                   type={showGH ? "text" : "password"}
                   value={settings.github_token}
                   onChange={(e) => setSettings((s) => ({ ...s, github_token: e.target.value }))}
-                  placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                  placeholder="ghp_xxxxxxxxxxxxxxxxxxxx  OR  github_pat_11..."
                   className="flex-1 bg-[#0A0A0A] border border-zinc-800 text-white placeholder:text-zinc-600 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
                   data-testid="github-token-input"
                 />
@@ -110,6 +110,25 @@ export default function Settings() {
                 </button>
               </div>
             </div>
+
+            {/* PAT Instructions */}
+            <div className="bg-[#0A0A0A] border border-zinc-800 p-3 space-y-2">
+              <p className="text-xs font-mono text-zinc-400 font-bold">Option A — Classic PAT (easiest):</p>
+              <ol className="text-xs font-mono text-zinc-500 space-y-0.5 list-decimal list-inside">
+                <li>Go to <span className="text-white">github.com/settings/tokens</span></li>
+                <li>Click <span className="text-emerald-400">Generate new token (classic)</span></li>
+                <li>Enable scope: <span className="text-emerald-400">repo</span> (full control)</li>
+                <li>Copy token starting with <span className="text-white">ghp_</span></li>
+              </ol>
+              <p className="text-xs font-mono text-zinc-400 font-bold mt-2">Option B — Fine-grained PAT:</p>
+              <ol className="text-xs font-mono text-zinc-500 space-y-0.5 list-decimal list-inside">
+                <li>Go to <span className="text-white">github.com/settings/tokens</span> → Fine-grained</li>
+                <li>Select repository: <span className="text-emerald-400">yashdodwani/AuditRx</span> (or All)</li>
+                <li>Permissions: <span className="text-emerald-400">Contents → Read &amp; write</span></li>
+                <li>Permissions: <span className="text-emerald-400">Pull requests → Read &amp; write</span></li>
+              </ol>
+            </div>
+
             <a
               href="https://github.com/settings/tokens/new?scopes=repo&description=RepoDoctor"
               target="_blank"
@@ -117,7 +136,7 @@ export default function Settings() {
               className="text-xs text-cyan-400 hover:text-cyan-300 flex items-center gap-1 font-mono"
               data-testid="github-token-link"
             >
-              Create GitHub PAT <ExternalLink size={10} />
+              Create Classic GitHub PAT (recommended) <ExternalLink size={10} />
             </a>
           </div>
         </SettingSection>
