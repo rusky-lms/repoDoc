@@ -8,7 +8,7 @@ across all branches against your org's coding rules."
 ## Architecture
 - **Frontend**: React 19 + Tailwind + shadcn (dark terminal theme, Chivo + JetBrains Mono)
 - **Backend**: FastAPI + MongoDB (Motor async)
-- **LLM**: Gemini 3 Flash via emergentintegrations (Emergent Universal Key)
+- **LLM**: Gemini 3 Flash via litellm
 - **Agent Loop**: observe → decide → act → verify → create_pr (refactored to support seeded bugs + branch targeting)
 - **Watcher**: Background asyncio task polling every 5 min per WatchedRepo
 - **Integrations**: Telegram Bot (polling), GitHub REST/Contents API + Issues API

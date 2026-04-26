@@ -41,7 +41,7 @@ _watcher_task = None
 
 
 def get_llm_key():
-    return os.environ.get("EMERGENT_LLM_KEY", "")
+    return os.environ.get("LLM_API_KEY", "")
 
 
 async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional[str] = None,

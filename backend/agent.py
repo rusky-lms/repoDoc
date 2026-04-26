@@ -8,7 +8,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Optional
 
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from llm import LlmChat, UserMessage
 
 logger = logging.getLogger(__name__)
 

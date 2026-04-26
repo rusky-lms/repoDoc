@@ -4,7 +4,7 @@ import uuid
 import json
 import logging
 from typing import List, Dict, Optional
-from emergentintegrations.llm.chat import LlmChat, UserMessage
+from llm import LlmChat, UserMessage
 
 logger = logging.getLogger(__name__)
 
