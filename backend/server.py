@@ -8,6 +8,7 @@ import os
 import logging
 import asyncio
 import json
+import httpx
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -39,10 +40,40 @@ watcher_svc: Optional[WatcherService] = None
 _telegram_task = None
 _gh_comment_task = None
 _watcher_task = None
+_keepalive_task = None
 
 
 def get_llm_key():
     return os.environ.get("LLM_API_KEY", "")
+
+
+def get_keepalive_url():
+    url = (os.environ.get("KEEPALIVE_URL") or os.environ.get("RENDER_EXTERNAL_URL") or "").strip()
+    if not url:
+        return ""
+    url = url.rstrip("/")
+    if not url.endswith("/api/health"):
+        url += "/api/health"
+    return url
+
+
+async def keepalive_loop():
+    url = get_keepalive_url()
+    if not url:
+        return
+
+    try:
+        interval = int(os.environ.get("KEEPALIVE_INTERVAL_SECONDS", "540"))
+    except ValueError:
+        interval = 540
+    async with httpx.AsyncClient(timeout=10, follow_redirects=True) as client:
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                response = await client.get(url)
+                logger.info("Keepalive ping %s -> %s", url, response.status_code)
+            except Exception as exc:
+                logger.warning("Keepalive ping failed: %s", exc)
 
 
 async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional[str] = None,
@@ -113,22 +144,27 @@ async def trigger_analysis_from_telegram(repo_url: str, chat_id: str):
 
 @app.on_event("startup")
 async def startup():
+    global _keepalive_task
     await db.analyses.update_many(
         {"status": {"$in": ["cloning", "analyzing", "fixing", "verifying", "creating_pr"]}},
         {"$set": {"status": "failed", "error": "Server restarted during analysis"}}
     )
     await init_services()
+    if get_keepalive_url() and (_keepalive_task is None or _keepalive_task.done()):
+        _keepalive_task = asyncio.create_task(keepalive_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _telegram_task, _gh_comment_task, _watcher_task
+    global _telegram_task, _gh_comment_task, _watcher_task, _keepalive_task
     if _telegram_task:
         _telegram_task.cancel()
     if _gh_comment_task:
         _gh_comment_task.cancel()
     if _watcher_task:
         _watcher_task.cancel()
+    if _keepalive_task:
+        _keepalive_task.cancel()
     client.close()
 
 
