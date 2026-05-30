@@ -3,7 +3,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
-from motor.motor_asyncio import AsyncIOMotorClient
+import asyncpg
+from db import PgDatabase
 import certifi
 import os
 import logging
@@ -31,27 +32,9 @@ class UnavailableDatabase:
     def __getattr__(self, name: str):
         raise HTTPException(status_code=503, detail=f"Database unavailable: {self.reason}")
 
-
-mongo_url = os.environ.get("MONGO_URL", "")
-db_name = os.environ.get("DB_NAME", "repodoc")
-client = None
-
-if mongo_url:
-    try:
-        mongo_timeout_ms = int(os.environ.get("MONGO_SERVER_SELECTION_TIMEOUT_MS", "5000"))
-    except ValueError:
-        mongo_timeout_ms = 5000
-    mongo_client_options = {"serverSelectionTimeoutMS": mongo_timeout_ms}
-    if mongo_url.startswith("mongodb+srv://") or "tls=true" in mongo_url or "ssl=true" in mongo_url:
-        mongo_client_options["tlsCAFile"] = certifi.where()
-        mongo_client_options["tlsAllowInvalidCertificates"] = True
-    try:
-        client = AsyncIOMotorClient(mongo_url, **mongo_client_options)
-        db = client[db_name]
-    except Exception as exc:
-        db = UnavailableDatabase(str(exc))
-else:
-    db = UnavailableDatabase("MONGO_URL is not configured")
+database_url = os.environ.get("DATABASE_URL", "")
+pool = None
+db = None
 
 app = FastAPI(title="repoDoc API")
 api_router = APIRouter(prefix="/api")
@@ -174,14 +157,23 @@ async def trigger_analysis_from_telegram(repo_url: str, chat_id: str):
 
 @app.on_event("startup")
 async def startup():
-    global _keepalive_task
+    global pool, db, _keepalive_task
+    if database_url:
+        try:
+            pool = await asyncpg.create_pool(database_url, ssl='require')
+            db = PgDatabase(pool)
+        except Exception as exc:
+            db = UnavailableDatabase(str(exc))
+    else:
+        db = UnavailableDatabase("DATABASE_URL is not configured")
+
     try:
         await db.analyses.update_many(
             {"status": {"$in": ["cloning", "analyzing", "fixing", "verifying", "creating_pr"]}},
             {"$set": {"status": "failed", "error": "Server restarted during analysis"}}
         )
     except Exception as exc:
-        logger.warning("MongoDB startup cleanup failed; continuing so web server can bind: %s", exc)
+        logger.warning("DB startup cleanup failed; continuing so web server can bind: %s", exc)
     await init_services()
     if get_keepalive_url() and (_keepalive_task is None or _keepalive_task.done()):
         _keepalive_task = asyncio.create_task(keepalive_loop())
@@ -198,8 +190,8 @@ async def shutdown():
         _watcher_task.cancel()
     if _keepalive_task:
         _keepalive_task.cancel()
-    if client:
-        client.close()
+    if pool:
+        await pool.close()
 
 
 # ── GitHub Webhook ────────────────────────────────────────────────────────────
