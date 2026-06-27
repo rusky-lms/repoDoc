@@ -58,6 +58,7 @@ class FileMap(BaseModel):
 
 class Analysis(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str = ""
     repo_url: str
     repo_name: str = ""
     status: str = "queued"
@@ -89,6 +90,7 @@ class AnalysisCreate(BaseModel):
 
 class Settings(BaseModel):
     id: str = "global"
+    user_id: str = ""
     github_token: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
@@ -112,6 +114,7 @@ class GuardrailRule(BaseModel):
 
 class Guardrails(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str = ""
     name: str
     description: str = ""
     rules: List[GuardrailRule] = []
@@ -123,6 +126,7 @@ class Guardrails(BaseModel):
 
 class WatchedRepo(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str = ""
     repo_url: str
     repo_name: str = ""
     telegram_chat_id: str = ""
@@ -137,6 +141,7 @@ class WatchedRepo(BaseModel):
 
 class WatchEvent(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
+    user_id: str = ""
     watched_repo_id: str
     repo_name: str = ""
     repo_url: str = ""

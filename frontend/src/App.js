@@ -8,6 +8,16 @@ import History from "@/pages/History";
 import Settings from "@/pages/Settings";
 import Guardrails from "@/pages/Guardrails";
 import Watch from "@/pages/Watch";
+import Login from "@/pages/Login";
+import Register from "@/pages/Register";
+
+function ProtectedRoute({ children }) {
+  const token = localStorage.getItem("token");
+  if (!token) {
+    return <Navigate to="/login" replace />;
+  }
+  return children;
+}
 
 function App() {
   return (
@@ -16,12 +26,14 @@ function App() {
         <NavBar />
         <main className="pt-14">
           <Routes>
-            <Route path="/" element={<Dashboard />} />
-            <Route path="/analysis/:id" element={<AnalysisDetail />} />
-            <Route path="/history" element={<History />} />
-            <Route path="/watch" element={<Watch />} />
-            <Route path="/guardrails" element={<Guardrails />} />
-            <Route path="/settings" element={<Settings />} />
+            <Route path="/login" element={<Login />} />
+            <Route path="/register" element={<Register />} />
+            <Route path="/" element={<ProtectedRoute><Dashboard /></ProtectedRoute>} />
+            <Route path="/analysis/:id" element={<ProtectedRoute><AnalysisDetail /></ProtectedRoute>} />
+            <Route path="/history" element={<ProtectedRoute><History /></ProtectedRoute>} />
+            <Route path="/watch" element={<ProtectedRoute><Watch /></ProtectedRoute>} />
+            <Route path="/guardrails" element={<ProtectedRoute><Guardrails /></ProtectedRoute>} />
+            <Route path="/settings" element={<ProtectedRoute><Settings /></ProtectedRoute>} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
         </main>

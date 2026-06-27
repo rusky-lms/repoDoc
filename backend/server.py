@@ -1,4 +1,7 @@
-from fastapi import FastAPI, APIRouter, HTTPException
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi.security import OAuth2PasswordRequestForm
+from auth import get_password_hash, verify_password, create_access_token, oauth2_scheme, ALGORITHM, SECRET_KEY
+from jose import JWTError, jwt
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
@@ -41,6 +44,63 @@ api_router = APIRouter(prefix="/api")
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username: str = payload.get("sub")
+        if username is None:
+            raise credentials_exception
+    except JWTError:
+        raise credentials_exception
+    
+    if db is None or isinstance(db, UnavailableDatabase):
+        raise HTTPException(status_code=503, detail="Database unavailable")
+        
+    user = await db.users.find_one({"username": username})
+    if user is None:
+        raise credentials_exception
+    return user
+
+@api_router.post("/auth/register")
+async def register(body: dict):
+    username = body.get("username")
+    password = body.get("password")
+    if not username or not password:
+        raise HTTPException(status_code=400, detail="Username and password required")
+    
+    existing = await db.users.find_one({"username": username})
+    if existing:
+        raise HTTPException(status_code=400, detail="Username already registered")
+        
+    import uuid
+    user_id = str(uuid.uuid4())
+    hashed_password = get_password_hash(password)
+    new_user = {
+        "id": user_id,
+        "username": username,
+        "hashed_password": hashed_password
+    }
+    await db.users.insert_one(new_user)
+    return {"id": user_id, "username": username}
+
+@api_router.post("/auth/login")
+async def login(form_data: OAuth2PasswordRequestForm = Depends()):
+    user = await db.users.find_one({"username": form_data.username})
+    if not user or not verify_password(form_data.password, user["hashed_password"]):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Incorrect username or password",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    access_token = create_access_token(data={"sub": user["username"]})
+    return {"access_token": access_token, "token_type": "bearer"}
+
 
 # Global services
 telegram_svc: Optional[TelegramService] = None
@@ -89,13 +149,29 @@ async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional
                         seed_bugs: Optional[list] = None, watch_event_id: Optional[str] = None,
                         telegram_chat_id: Optional[str] = None):
     """Wrapper that injects current service refs into the agent."""
+    analysis = await db.analyses.find_one({"id": analysis_id})
+    user_id = analysis.get("user_id") if analysis else None
+    
+    local_tg = None
+    local_gh = None
+    
+    if user_id:
+        settings = await db.settings.find_one({"user_id": user_id})
+        if settings:
+            from github_service import GitHubService
+            from telegram_service import TelegramService
+            if settings.get("github_token"):
+                local_gh = GitHubService(settings["github_token"])
+            if settings.get("telegram_bot_token"):
+                local_tg = TelegramService(settings["telegram_bot_token"])
+
     await run_analysis_task(
         analysis_id=analysis_id,
         repo_url=repo_url,
         db=db,
         llm_key=get_llm_key(),
-        telegram_svc=telegram_svc,
-        github_svc=github_svc,
+        telegram_svc=local_tg,
+        github_svc=local_gh,
         telegram_chat_id=telegram_chat_id,
         target_branch=target_branch,
         seed_bugs=seed_bugs,
@@ -133,13 +209,7 @@ async def init_services():
         watcher_svc = WatcherService()
     if _watcher_task is None or _watcher_task.done():
         _watcher_task = asyncio.create_task(
-            watcher_svc.start(
-                db,
-                lambda: github_svc,
-                lambda: telegram_svc,
-                _agent_runner,
-                get_llm_key,
-            )
+            watcher_svc.start(db, _agent_runner, get_llm_key)
         )
 
 
@@ -204,31 +274,49 @@ async def github_webhook(request: dict):
     pr = request.get("issue", {}) or request.get("pull_request", {})
     pr_url = pr.get("html_url", "")
 
-    if action == "created" and comment and pr_url and github_svc:
+    if action == "created" and comment and pr_url:
         # Find the matching analysis
         analysis = await db.analyses.find_one({"pr_url": pr_url}, {"_id": 0})
         if analysis:
-            asyncio.create_task(
-                github_svc._check_and_reply(analysis, db, get_llm_key())
-            )
+            user_id = analysis.get("user_id")
+            if user_id:
+                settings = await db.settings.find_one({"user_id": user_id})
+                if settings and settings.get("github_token"):
+                    from github_service import GitHubService
+                    local_github_svc = GitHubService(settings["github_token"])
+                    asyncio.create_task(
+                        local_github_svc._check_and_reply(analysis, db, get_llm_key())
+                    )
     return {"ok": True}
 
 
 # ── Analysis Routes ───────────────────────────────────────────────────────────
 
 @api_router.post("/analyses", response_model=dict)
-async def create_analysis(body: AnalysisCreate):
+async def create_analysis(body: AnalysisCreate, current_user: dict = Depends(get_current_user)):
     analysis = Analysis(
+        user_id=current_user["id"],
         repo_url=body.repo_url,
         telegram_chat_id=body.telegram_chat_id,
     )
     doc = analysis.model_dump()
     await db.analyses.insert_one(doc)
 
+    settings = await db.settings.find_one({"user_id": current_user["id"]})
+    local_tg = None
+    local_gh = None
+    if settings:
+        from github_service import GitHubService
+        from telegram_service import TelegramService
+        if settings.get("github_token"):
+            local_gh = GitHubService(settings["github_token"])
+        if settings.get("telegram_bot_token"):
+            local_tg = TelegramService(settings["telegram_bot_token"])
+
     asyncio.create_task(run_analysis_task(
         analysis.id, body.repo_url, db, get_llm_key(),
-        telegram_svc=telegram_svc,
-        github_svc=github_svc,
+        telegram_svc=local_tg,
+        github_svc=local_gh,
         telegram_chat_id=body.telegram_chat_id,
     ))
 
@@ -236,8 +324,8 @@ async def create_analysis(body: AnalysisCreate):
 
 
 @api_router.get("/analyses", response_model=List[dict])
-async def list_analyses():
-    docs = await db.analyses.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+async def list_analyses(current_user: dict = Depends(get_current_user)):
+    docs = await db.analyses.find({"user_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
     for doc in docs:
         doc.pop("logs", None)
         doc.pop("file_map", None)
@@ -245,28 +333,43 @@ async def list_analyses():
 
 
 @api_router.get("/analyses/{analysis_id}", response_model=dict)
-async def get_analysis(analysis_id: str):
-    doc = await db.analyses.find_one({"id": analysis_id}, {"_id": 0})
+async def get_analysis(analysis_id: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.analyses.find_one({"id": analysis_id, "user_id": current_user["id"]}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return doc
 
 
 @api_router.delete("/analyses/{analysis_id}")
-async def delete_analysis(analysis_id: str):
-    result = await db.analyses.delete_one({"id": analysis_id})
+async def delete_analysis(analysis_id: str, current_user: dict = Depends(get_current_user)):
+    result = await db.analyses.delete_one({"id": analysis_id, "user_id": current_user["id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Analysis not found")
     return {"message": "Deleted"}
 
 
 @api_router.get("/analyses/{analysis_id}/stream")
-async def stream_logs(analysis_id: str):
+async def stream_logs(analysis_id: str, token: str = None):
+    # Decode token manually since EventSource can't send headers easily
+    if not token:
+        raise HTTPException(status_code=401, detail="Token required")
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        username = payload.get("sub")
+        if not username:
+            raise HTTPException(status_code=401, detail="Invalid token")
+        user = await db.users.find_one({"username": username})
+        if not user:
+            raise HTTPException(status_code=401, detail="User not found")
+        user_id = user["id"]
+    except Exception:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
     async def event_generator():
         last_count = 0
         attempts = 0
         while attempts < 300:
-            doc = await db.analyses.find_one({"id": analysis_id}, {"_id": 0, "logs": 1, "status": 1})
+            doc = await db.analyses.find_one({"id": analysis_id, "user_id": user_id}, {"_id": 0, "logs": 1, "status": 1})
             if not doc:
                 yield f"data: {json.dumps({'type': 'error', 'message': 'Not found'})}\n\n"
                 break
@@ -293,21 +396,24 @@ async def stream_logs(analysis_id: str):
 # ── Stats Route ───────────────────────────────────────────────────────────────
 
 @api_router.get("/stats")
-async def get_stats():
-    total = await db.analyses.count_documents({})
-    completed = await db.analyses.count_documents({"status": "completed"})
-    failed = await db.analyses.count_documents({"status": "failed"})
-    running = await db.analyses.count_documents({"status": {"$nin": ["completed", "failed", "queued"]}})
+async def get_stats(current_user: dict = Depends(get_current_user)):
+    user_id = current_user["id"]
+    total = await db.analyses.count_documents({"user_id": user_id})
+    completed = await db.analyses.count_documents({"user_id": user_id, "status": "completed"})
+    failed = await db.analyses.count_documents({"user_id": user_id, "status": "failed"})
+    running = await db.analyses.count_documents({"user_id": user_id, "status": {"$nin": ["completed", "failed", "queued"]}})
     pipeline = [
         {"$group": {"_id": None,
                     "bugs": {"$sum": {"$size": {"$ifNull": ["$bugs", []]}}},
                     "fixes": {"$sum": {"$size": {"$filter": {"input": {"$ifNull": ["$fixes", []]},
                                                               "cond": {"$eq": ["$$this.verified", True]}}}}}}}
     ]
-    agg = await db.analyses.aggregate(pipeline).to_list(1)
-    bugs_total = agg[0]["bugs"] if agg else 0
-    fixes_total = agg[0]["fixes"] if agg else 0
-    prs = await db.analyses.count_documents({"pr_url": {"$ne": None, "$exists": True}})
+    # For stats, our mock db.aggregate doesn't support $match, so we just return total bugs/fixes for all analyses 
+    # Or we can just calculate them here
+    docs = await db.analyses.find({"user_id": user_id}).to_list()
+    bugs_total = sum(len(d.get("bugs") or []) for d in docs)
+    fixes_total = sum(1 for d in docs for fix in (d.get("fixes") or []) if isinstance(fix, dict) and fix.get("verified"))
+    prs = sum(1 for d in docs if d.get("pr_url"))
     return {
         "total_analyses": total,
         "completed": completed,
@@ -322,8 +428,8 @@ async def get_stats():
 # ── Settings Routes ───────────────────────────────────────────────────────────
 
 @api_router.get("/settings")
-async def get_settings():
-    doc = await db.settings.find_one({"id": "global"}, {"_id": 0})
+async def get_settings(current_user: dict = Depends(get_current_user)):
+    doc = await db.settings.find_one({"user_id": current_user["id"]}, {"_id": 0})
     if not doc:
         return Settings().model_dump()
     result = dict(doc)
@@ -337,10 +443,10 @@ async def get_settings():
 
 
 @api_router.post("/settings")
-async def save_settings(body: dict):
-    body["id"] = "global"
+async def save_settings(body: dict, current_user: dict = Depends(get_current_user)):
+    body["user_id"] = current_user["id"]
     body["updated_at"] = datetime.now(timezone.utc).isoformat()
-    await db.settings.replace_one({"id": "global"}, body, upsert=True)
+    await db.settings.replace_one({"user_id": current_user["id"]}, body, upsert=True)
     await init_services()
     return {"message": "Settings saved"}
 
@@ -363,11 +469,12 @@ async def list_builtin_guardrails():
 
 
 @api_router.post("/guardrails/from-preset")
-async def create_guardrails_from_preset(body: dict):
+async def create_guardrails_from_preset(body: dict, current_user: dict = Depends(get_current_user)):
     preset_key = body.get("preset", "startup")
     template = gs_mod.build_guardrails_from_preset(preset_key)
     from models import Guardrails
     gr = Guardrails(
+        user_id=current_user["id"],
         name=body.get("name") or template["name"],
         description=template["description"],
         rules=template["rules"],
@@ -378,23 +485,24 @@ async def create_guardrails_from_preset(body: dict):
 
 
 @api_router.get("/guardrails")
-async def list_guardrails():
-    docs = await db.guardrails.find({}, {"_id": 0}).sort("created_at", -1).to_list(50)
+async def list_guardrails(current_user: dict = Depends(get_current_user)):
+    docs = await db.guardrails.find({"user_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(50)
     return docs
 
 
 @api_router.get("/guardrails/{gid}")
-async def get_guardrails(gid: str):
-    doc = await db.guardrails.find_one({"id": gid}, {"_id": 0})
+async def get_guardrails(gid: str, current_user: dict = Depends(get_current_user)):
+    doc = await db.guardrails.find_one({"id": gid, "user_id": current_user["id"]}, {"_id": 0})
     if not doc:
         raise HTTPException(status_code=404, detail="Guardrails not found")
     return doc
 
 
 @api_router.post("/guardrails")
-async def create_guardrails(body: dict):
+async def create_guardrails(body: dict, current_user: dict = Depends(get_current_user)):
     from models import Guardrails
     gr = Guardrails(
+        user_id=current_user["id"],
         name=body.get("name", "Custom Ruleset"),
         description=body.get("description", ""),
         rules=body.get("rules", []),
@@ -405,18 +513,18 @@ async def create_guardrails(body: dict):
 
 
 @api_router.put("/guardrails/{gid}")
-async def update_guardrails(gid: str, body: dict):
+async def update_guardrails(gid: str, body: dict, current_user: dict = Depends(get_current_user)):
     body.pop("_id", None)
     body["updated_at"] = datetime.now(timezone.utc).isoformat()
-    result = await db.guardrails.update_one({"id": gid}, {"$set": body})
+    result = await db.guardrails.update_one({"id": gid, "user_id": current_user["id"]}, {"$set": body})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Guardrails not found")
     return await db.guardrails.find_one({"id": gid}, {"_id": 0})
 
 
 @api_router.delete("/guardrails/{gid}")
-async def delete_guardrails(gid: str):
-    result = await db.guardrails.delete_one({"id": gid})
+async def delete_guardrails(gid: str, current_user: dict = Depends(get_current_user)):
+    result = await db.guardrails.delete_one({"id": gid, "user_id": current_user["id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Guardrails not found")
     # Detach from any watched repos
@@ -427,15 +535,16 @@ async def delete_guardrails(gid: str):
 # ── Watched Repos Routes ──────────────────────────────────────────────────────
 
 @api_router.get("/watched-repos")
-async def list_watched_repos():
-    docs = await db.watched_repos.find({}, {"_id": 0}).sort("created_at", -1).to_list(100)
+async def list_watched_repos(current_user: dict = Depends(get_current_user)):
+    docs = await db.watched_repos.find({"user_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(100)
     return docs
 
 
 @api_router.post("/watched-repos")
-async def add_watched_repo(body: dict):
+async def add_watched_repo(body: dict, current_user: dict = Depends(get_current_user)):
     from models import WatchedRepo
     wr = WatchedRepo(
+        user_id=current_user["id"],
         repo_url=body.get("repo_url", ""),
         telegram_chat_id=body.get("telegram_chat_id", "") or "",
         guardrails_id=body.get("guardrails_id"),
@@ -455,18 +564,18 @@ async def add_watched_repo(body: dict):
 
 
 @api_router.put("/watched-repos/{wid}")
-async def update_watched_repo(wid: str, body: dict):
+async def update_watched_repo(wid: str, body: dict, current_user: dict = Depends(get_current_user)):
     body.pop("_id", None)
     body.pop("id", None)
-    result = await db.watched_repos.update_one({"id": wid}, {"$set": body})
+    result = await db.watched_repos.update_one({"id": wid, "user_id": current_user["id"]}, {"$set": body})
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Watched repo not found")
     return await db.watched_repos.find_one({"id": wid}, {"_id": 0})
 
 
 @api_router.delete("/watched-repos/{wid}")
-async def delete_watched_repo(wid: str):
-    result = await db.watched_repos.delete_one({"id": wid})
+async def delete_watched_repo(wid: str, current_user: dict = Depends(get_current_user)):
+    result = await db.watched_repos.delete_one({"id": wid, "user_id": current_user["id"]})
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Watched repo not found")
     return {"message": "Deleted"}
@@ -478,12 +587,11 @@ async def check_watched_repo_now(wid: str):
     watched = await db.watched_repos.find_one({"id": wid}, {"_id": 0})
     if not watched:
         raise HTTPException(status_code=404, detail="Watched repo not found")
-    if not github_svc:
-        raise HTTPException(status_code=400, detail="GitHub token not configured")
+    
     if watcher_svc is None:
         raise HTTPException(status_code=400, detail="Watcher not initialized")
     asyncio.create_task(
-        watcher_svc.check_repo(watched, db, github_svc, telegram_svc, _agent_runner, get_llm_key())
+        watcher_svc.check_repo(watched, db, _agent_runner, get_llm_key())
     )
     return {"message": "Check triggered"}
 
@@ -496,8 +604,7 @@ async def replay_last_commit(wid: str):
     watched = await db.watched_repos.find_one({"id": wid}, {"_id": 0})
     if not watched:
         raise HTTPException(status_code=404, detail="Watched repo not found")
-    if not github_svc:
-        raise HTTPException(status_code=400, detail="GitHub token not configured")
+    
     if watcher_svc is None:
         raise HTTPException(status_code=400, detail="Watcher not initialized")
 
@@ -509,14 +616,14 @@ async def replay_last_commit(wid: str):
     )
     watched["last_commits"] = reset
     asyncio.create_task(
-        watcher_svc.check_repo(watched, db, github_svc, telegram_svc, _agent_runner, get_llm_key())
+        watcher_svc.check_repo(watched, db, _agent_runner, get_llm_key())
     )
     return {"message": "Replay triggered — alert + PR will land in ~25s"}
 
 
 @api_router.get("/watch-events")
-async def list_watch_events(watched_repo_id: Optional[str] = None, limit: int = 50):
-    q = {}
+async def list_watch_events(watched_repo_id: Optional[str] = None, limit: int = 50, current_user: dict = Depends(get_current_user)):
+    q = {"user_id": current_user["id"]}
     if watched_repo_id:
         q["watched_repo_id"] = watched_repo_id
     docs = await db.watch_events.find(q, {"_id": 0}).sort("created_at", -1).to_list(limit)

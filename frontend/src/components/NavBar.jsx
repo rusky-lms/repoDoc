@@ -12,6 +12,16 @@ const navLinks = [
 
 export default function NavBar() {
   const { pathname } = useLocation();
+  const token = localStorage.getItem("token");
+
+  if (!token || pathname === "/login" || pathname === "/register") {
+    return null;
+  }
+
+  const handleLogout = () => {
+    localStorage.removeItem("token");
+    window.location.href = "/login";
+  };
 
   return (
     <header className="fixed top-0 left-0 right-0 z-50 h-14 bg-[#0A0A0A] border-b border-zinc-800 flex items-center px-6">
@@ -45,11 +55,19 @@ export default function NavBar() {
         })}
       </nav>
 
-      <div className="ml-auto flex items-center gap-2">
-        <span className="text-xs font-mono text-zinc-500">
-          autonomous bug fixer
-        </span>
-        <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+      <div className="ml-auto flex items-center gap-4">
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-mono text-zinc-500">
+            autonomous bug fixer
+          </span>
+          <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+        </div>
+        <button
+          onClick={handleLogout}
+          className="text-xs font-mono text-zinc-400 hover:text-white px-2 py-1 rounded bg-zinc-800"
+        >
+          Logout
+        </button>
       </div>
     </header>
   );

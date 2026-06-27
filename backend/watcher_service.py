@@ -51,13 +51,13 @@ class WatcherService:
     def __init__(self):
         self._running = False
 
-    async def start(self, db, get_github, get_telegram, agent_runner, get_llm_key):
+    async def start(self, db, agent_runner, get_llm_key):
         """Background poller. Pass getter functions so we always pick up the latest service refs."""
         self._running = True
         logger.info(f"Watcher service started (interval={POLL_INTERVAL_SECONDS}s)")
         while self._running:
             try:
-                await self.tick(db, get_github(), get_telegram(), agent_runner, get_llm_key())
+                await self.tick(db, agent_runner, get_llm_key())
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -67,23 +67,33 @@ class WatcherService:
     def stop(self):
         self._running = False
 
-    async def tick(self, db, github_svc, telegram_svc, agent_runner, llm_key: str):
+    async def tick(self, db, agent_runner, llm_key: str):
         """Run one polling pass over all active watched repos."""
-        if not github_svc:
-            return
+        
         repos = await db.watched_repos.find({"active": True}, {"_id": 0}).to_list(100)
         if not repos:
             return
         logger.info(f"Watcher tick: scanning {len(repos)} repo(s)")
         for repo in repos:
             try:
-                await self.check_repo(repo, db, github_svc, telegram_svc, agent_runner, llm_key)
+                await self.check_repo(repo, db, agent_runner, llm_key)
             except Exception as e:
                 logger.warning(f"Watcher check_repo error for {repo.get('repo_url')}: {e}")
 
-    async def check_repo(self, watched: dict, db, github_svc, telegram_svc, agent_runner, llm_key: str):
+    async def check_repo(self, watched: dict, db, agent_runner, llm_key: str):
         """Check a single watched repo: detect new commits per branch and process them."""
         repo_url = watched.get("repo_url", "")
+        user_id = watched.get("user_id")
+        settings = await db.settings.find_one({"user_id": user_id})
+        if not settings or not settings.get("github_token"):
+            logger.warning(f"No github token for user_id {user_id}")
+            return
+            
+        from github_service import GitHubService
+        from telegram_service import TelegramService
+        github_svc = GitHubService(settings["github_token"])
+        telegram_svc = TelegramService(settings["telegram_bot_token"]) if settings.get("telegram_bot_token") else None
+        
         try:
             owner, repo = github_svc._parse_repo(repo_url)
         except Exception as e:
