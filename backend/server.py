@@ -444,8 +444,17 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
 
 @api_router.post("/settings")
 async def save_settings(body: dict, current_user: dict = Depends(get_current_user)):
+    import uuid
     body["user_id"] = current_user["id"]
     body["updated_at"] = datetime.now(timezone.utc).isoformat()
+    
+    # Avoid duplicate 'global' ID constraint violations from default frontend payload
+    existing = await db.settings.find_one({"user_id": current_user["id"]})
+    if existing:
+        body["id"] = existing.get("id", str(uuid.uuid4()))
+    else:
+        body["id"] = str(uuid.uuid4())
+        
     await db.settings.replace_one({"user_id": current_user["id"]}, body, upsert=True)
     await init_services()
     return {"message": "Settings saved"}
