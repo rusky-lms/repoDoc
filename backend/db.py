@@ -68,10 +68,14 @@ class Cursor:
             field, direction = self._sort
             order_clause = f" ORDER BY doc->>'{field}' {direction}"
         limit_clause = f" LIMIT {length}" if length else ""
-        sql = f"SELECT doc FROM {self.collection.name} WHERE {where_clause}{order_clause}{limit_clause}"
+        sql = f"SELECT id, doc FROM {self.collection.name} WHERE {where_clause}{order_clause}{limit_clause}"
         async with self.collection.db.pool.acquire() as conn:
             rows = await conn.fetch(sql, *params)
-        results = [json.loads(row['doc']) for row in rows]
+        results = []
+        for row in rows:
+            d = json.loads(row['doc'])
+            d["id"] = row["id"]
+            results.append(d)
         # Extremely basic projection handler
         if self.projection:
             exclusions = [k for k, v in self.projection.items() if v == 0]
@@ -114,11 +118,12 @@ class PgCollection:
     async def find_one(self, query, projection=None):
         await self._ensure_table()
         where_clause, params = parse_query(query)
-        sql = f"SELECT doc FROM {self.name} WHERE {where_clause} LIMIT 1"
+        sql = f"SELECT id, doc FROM {self.name} WHERE {where_clause} LIMIT 1"
         async with self.db.pool.acquire() as conn:
             row = await conn.fetchrow(sql, *params)
         if row:
             res = json.loads(row['doc'])
+            res["id"] = row["id"]
             if projection:
                 exclusions = [k for k, v in projection.items() if v == 0]
                 for k in exclusions:
