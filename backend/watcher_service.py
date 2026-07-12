@@ -131,6 +131,25 @@ class WatcherService:
             # First-ever check: just record current SHAs without alerting
             if is_first_run:
                 last_commits[branch] = sha
+                # Trigger an initial scan for the main/master branch to check existing code
+                if branch in ("main", "master") and agent_runner:
+                    from models import Analysis
+                    analysis = Analysis(
+                        repo_url=repo_url,
+                        telegram_chat_id=chat_id or None,
+                        target_branch=branch,
+                        triggered_by="initial_scan",
+                    )
+                    doc_analysis = analysis.model_dump()
+                    await db.analyses.insert_one(doc_analysis)
+                    asyncio.create_task(agent_runner(
+                        analysis_id=analysis.id,
+                        repo_url=repo_url,
+                        target_branch=branch,
+                        seed_bugs=None,
+                        watch_event_id=None,
+                        telegram_chat_id=chat_id or None,
+                    ))
                 continue
 
             if previous_sha == sha:
