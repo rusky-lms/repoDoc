@@ -183,6 +183,9 @@ async def init_services():
     global telegram_svc, github_svc, watcher_svc, _telegram_task, _gh_comment_task, _watcher_task
     try:
         settings = await db.settings.find_one({"id": "global"})
+        if not settings:
+            # Fallback to the first user's settings
+            settings = await db.settings.find_one({})
     except Exception as exc:
         logger.warning("Skipping optional service initialization; MongoDB is not reachable: %s", exc)
         return

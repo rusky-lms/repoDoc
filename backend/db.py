@@ -31,22 +31,27 @@ def parse_query(query: dict) -> tuple[str, list]:
                         placeholders.append(f"${len(params)}")
                     conditions.append(f"doc->>'{k}' NOT IN ({','.join(placeholders)})")
             elif "$ne" in v:
-                params.append(v["$ne"])
-                conditions.append(f"doc->>'{k}' != ${len(params)}")
+                if v["$ne"] is None:
+                    conditions.append(f"doc->>'{k}' IS NOT NULL")
+                else:
+                    params.append(v["$ne"])
+                    conditions.append(f"doc->>'{k}' != ${len(params)}")
             elif "$exists" in v:
                 if v["$exists"]:
                     conditions.append(f"doc ? '{k}'")
                 else:
                     conditions.append(f"NOT (doc ? '{k}')")
         else:
-            params.append(v)
             if v is None:
                 conditions.append(f"doc->>'{k}' IS NULL")
             elif isinstance(v, bool):
+                params.append(v)
                 conditions.append(f"(doc->>'{k}')::boolean = ${len(params)}")
             elif isinstance(v, int):
+                params.append(v)
                 conditions.append(f"(doc->>'{k}')::numeric = ${len(params)}")
             else:
+                params.append(v)
                 conditions.append(f"doc->>'{k}' = ${len(params)}")
     return " AND ".join(conditions), params
 class Cursor:
