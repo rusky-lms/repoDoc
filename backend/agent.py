@@ -470,19 +470,31 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
     """
     repo_dir = f"/tmp/repodoc/{analysis_id}"
 
+    # Initialize in-memory step tracking
+    doc = await db.analyses.find_one({"id": analysis_id})
+    agent_steps = (doc.get("agent_steps") if doc else None) or [
+        {"step": "observe", "label": "Observe", "status": "pending"},
+        {"step": "decide", "label": "Decide", "status": "pending"},
+        {"step": "act", "label": "Act", "status": "pending"},
+        {"step": "verify", "label": "Verify", "status": "pending"},
+        {"step": "create_pr", "label": "Create PR", "status": "pending"},
+    ]
+
     async def add_log(msg: str, level: str = "info"):
         entry = {"timestamp": utc_now(), "level": level, "message": msg}
         await db.analyses.update_one({"id": analysis_id}, {"$push": {"logs": entry}})
         logger.info(f"[{analysis_id[:8]}] {msg}")
 
     async def update_step(step: str, status: str, message: str = ""):
+        for s in agent_steps:
+            if s.get("step") == step:
+                s["status"] = status
+                s["message"] = message
+                s["updated_at"] = utc_now()
+                break
         await db.analyses.update_one(
-            {"id": analysis_id, "agent_steps.step": step},
-            {"$set": {
-                "agent_steps.$.status": status,
-                "agent_steps.$.message": message,
-                "agent_steps.$.updated_at": utc_now(),
-            }}
+            {"id": analysis_id},
+            {"$set": {"agent_steps": agent_steps}}
         )
 
     try:
@@ -591,6 +603,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
             return
 
         # ── STEP 4: VERIFY ───────────────────────────────────────────────────
+        await db.analyses.update_one({"id": analysis_id}, {"$set": {"status": "verifying"}})
         await update_step("verify", "active", "Generating and verifying fixes...")
         fixes = []
 
@@ -652,6 +665,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         # ── STEP 5: CREATE PR & GITHUB ISSUE ──────────────────────────────────
         pr_url = None
         if github_svc and verified_count > 0:
+            await db.analyses.update_one({"id": analysis_id}, {"$set": {"status": "creating_pr"}})
             await update_step("create_pr", "active", "Creating GitHub PR...")
             await add_log("Creating GitHub PR...")
             try:
@@ -721,14 +735,16 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
     except Exception as e:
         logger.exception(f"Analysis {analysis_id} failed with exception")
         await add_log(f"Analysis failed: {str(e)}", "error")
+        for s in agent_steps:
+            if s.get("status") == "active":
+                s["status"] = "failed"
+                s["updated_at"] = utc_now()
         await db.analyses.update_one({"id": analysis_id}, {
-            "$set": {"status": "failed", "error": str(e)[:500]}
+            "$set": {
+                "status": "failed",
+                "error": str(e)[:500],
+                "agent_steps": agent_steps,
+            }
         })
-        # Mark active steps as failed
-        for step in ["observe", "decide", "act", "verify", "create_pr"]:
-            await db.analyses.update_one(
-                {"id": analysis_id, "agent_steps.step": step, "agent_steps.status": "active"},
-                {"$set": {"agent_steps.$.status": "failed"}}
-            )
     finally:
         shutil.rmtree(repo_dir, ignore_errors=True)
