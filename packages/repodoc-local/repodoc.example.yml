@@ -1,0 +1,27 @@
+# repoDoc Guardrail Configuration
+# Place this file as 'repodoc.yml' in the root of your repository.
+
+rules:
+  - id: no_console_log
+    name: No Console Logs
+    category: quality
+    type: pattern
+    pattern: "console\\.log\\("
+    severity: warning
+    description: "Detects unremoved console.log statements in production code"
+
+  - id: no_http_urls
+    name: No Insecure HTTP URLs
+    category: security
+    type: pattern
+    pattern: "http://(?!localhost|127\\.0\\.0\\.1)"
+    severity: warning
+    description: "Detects insecure http:// URLs that should use https://"
+
+  - id: require_strict_equality
+    name: Require Strict Equality
+    category: quality
+    type: pattern
+    pattern: "[^!=]==[^=]"
+    severity: info
+    description: "Avoid loose equality checks (==) in JavaScript/TypeScript"
