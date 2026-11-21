@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import axios from "axios";
-import { ArrowLeft, ExternalLink, GitPullRequest, RefreshCw } from "lucide-react";
+import { ArrowLeft, ExternalLink, GitPullRequest, RefreshCw, MessageSquare, Send, Sparkles } from "lucide-react";
 import AgentStepper from "@/components/AgentStepper";
 import LogStream from "@/components/LogStream";
 import BugCard from "@/components/BugCard";
@@ -25,6 +25,98 @@ function StatusBadge({ status }) {
     <span className={`text-xs font-mono px-2 py-1 border ${map[status] || map.queued}`} data-testid="status-badge">
       {status}
     </span>
+  );
+}
+
+function AskBox({ analysisId }) {
+  const [question, setQuestion] = useState("");
+  const [messages, setMessages] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const handleAsk = async (e) => {
+    e.preventDefault();
+    if (!question.trim() || loading) return;
+    const userQ = question.trim();
+    setQuestion("");
+    setError("");
+    setLoading(true);
+
+    const history = messages.slice(-6);
+    const updatedMessages = [...messages, { role: "user", content: userQ }];
+    setMessages(updatedMessages);
+
+    try {
+      const res = await axios.post(`${API}/analyses/${analysisId}/ask`, {
+        question: userQ,
+        history,
+      });
+      setMessages([...updatedMessages, { role: "assistant", content: res.data.answer }]);
+    } catch (err) {
+      const detail = err.response?.data?.detail || "Failed to get answer";
+      setError(detail);
+      setMessages([...updatedMessages, { role: "assistant", content: `Error: ${detail}` }]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="border border-zinc-800 bg-[#111111] p-4 mt-4" data-testid="ask-box">
+      <div className="flex items-center gap-2 mb-2">
+        <MessageSquare size={14} className="text-emerald-400" />
+        <h3 className="text-xs font-[Chivo] font-bold text-zinc-300 uppercase tracking-widest">
+          Ask about this change
+        </h3>
+      </div>
+      <p className="text-[11px] text-zinc-500 mb-3 font-mono">
+        Ask Gemini questions grounded strictly in this run's findings, diffs, and explanations.
+      </p>
+
+      {messages.length > 0 && (
+        <div className="space-y-2 mb-3 max-h-60 overflow-y-auto pr-1">
+          {messages.map((m, idx) => (
+            <div
+              key={idx}
+              className={`p-2.5 rounded text-xs font-mono ${
+                m.role === "user"
+                  ? "bg-zinc-800/80 text-white ml-4 border border-zinc-700"
+                  : "bg-black/60 text-zinc-300 mr-4 border border-zinc-800"
+              }`}
+            >
+              <span className={`text-[10px] uppercase font-bold block mb-1 ${m.role === "user" ? "text-emerald-400" : "text-cyan-400"}`}>
+                {m.role === "user" ? "You" : "Gemini"}
+              </span>
+              <div className="whitespace-pre-wrap">{m.content}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <form onSubmit={handleAsk} className="flex gap-2">
+        <input
+          type="text"
+          value={question}
+          onChange={(e) => setQuestion(e.target.value)}
+          placeholder="Ask a question about this change..."
+          className="flex-1 bg-[#0A0A0A] border border-zinc-800 text-white placeholder:text-zinc-600 px-3 py-1.5 text-xs font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
+          data-testid="ask-question-input"
+          disabled={loading}
+        />
+        <button
+          type="submit"
+          disabled={loading || !question.trim()}
+          className="px-3 py-1.5 bg-white text-black text-xs font-bold hover:bg-zinc-200 transition-colors disabled:opacity-50 flex items-center gap-1 shrink-0"
+          data-testid="ask-submit-btn"
+        >
+          {loading ? <RefreshCw size={12} className="animate-spin" /> : <Send size={12} />}
+          Ask
+        </button>
+      </form>
+      {error && (
+        <p className="text-red-400 text-[11px] font-mono mt-2" data-testid="ask-error">{error}</p>
+      )}
+    </div>
   );
 }
 
@@ -122,6 +214,21 @@ export default function AnalysisDetail() {
         )}
       </div>
 
+      {/* Executive Summary */}
+      {analysis.summary && (
+        <div className="border border-zinc-800 bg-[#111111] p-4 mb-6" data-testid="analysis-summary">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles size={14} className="text-emerald-400" />
+            <h3 className="text-xs font-[Chivo] font-bold text-white uppercase tracking-widest">
+              Executive Summary
+            </h3>
+          </div>
+          <p className="text-xs font-mono text-zinc-300 leading-relaxed whitespace-pre-wrap">
+            {analysis.summary}
+          </p>
+        </div>
+      )}
+
       {/* Summary bar */}
       {analysis.status === "completed" && (
         <div className="grid grid-cols-3 border border-zinc-800 mb-6">
@@ -151,6 +258,9 @@ export default function AnalysisDetail() {
             </h2>
             <AgentStepper steps={analysis.agent_steps || []} />
           </div>
+
+          {/* Ask about this change Box */}
+          <AskBox analysisId={id} />
 
           {/* Error display */}
           {analysis.error && (

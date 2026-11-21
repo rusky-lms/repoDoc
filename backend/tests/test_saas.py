@@ -11,7 +11,7 @@ import time
 import pytest
 import requests
 
-BASE_URL = os.environ['REACT_APP_BACKEND_URL'].rstrip('/')
+BASE_URL = os.environ.get('REACT_APP_BACKEND_URL', 'http://localhost:8001').rstrip('/')
 API = f"{BASE_URL}/api"
 
 # Use a tiny public repo for read-only watcher tests (no write ops).
@@ -131,7 +131,7 @@ class TestWatchedRepos:
         # Use no guardrails => watcher won't trigger agent even if a commit is "new"
         r = requests.post(
             f"{API}/watched-repos",
-            json={"repo_url": TEST_REPO_URL, "telegram_chat_id": ""},
+            json={"repo_url": TEST_REPO_URL},
             timeout=15,
         )
         assert r.status_code == 200

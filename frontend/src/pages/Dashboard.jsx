@@ -192,7 +192,13 @@ function AnalysisRow({ analysis, navigate }) {
         <span className="text-sm font-mono text-white truncate block">
           {analysis.repo_name || analysis.repo_url}
         </span>
-        <span className="text-xs font-mono text-zinc-600">
+        {analysis.summary && (
+          <p className="text-xs text-zinc-400 mt-1 line-clamp-1" title={analysis.summary}>
+            <span className="text-emerald-400 font-mono text-[10px] uppercase mr-1">Summary:</span>
+            {analysis.summary}
+          </p>
+        )}
+        <span className="text-xs font-mono text-zinc-600 block mt-0.5">
           {new Date(analysis.created_at).toLocaleString()}
         </span>
       </div>
