@@ -88,10 +88,10 @@ export async function detectHardware(): Promise<HardwareInfo> {
 }
 
 export function canComfortablyRunE4B(hw: HardwareInfo): boolean {
-  // Sufficient RAM path
-  if (hw.availableRam >= 10) return true;
   // Sufficient GPU VRAM path
   if (hw.gpu && hw.gpu.vram !== undefined && hw.gpu.vram >= 6) return true;
+  // Sufficient RAM path: require at least 8 GB available RAM when no GPU with enough VRAM
+  if (hw.availableRam >= 8) return true;
   return false;
 }
 
@@ -146,10 +146,10 @@ export function printHardwareReport(
   console.log(chalk.green(`✓ ${modelLabel} (${spec.ollamaTag})`));
   console.log();
   console.log(
-    `${chalk.gray("Estimated download:")} ${chalk.white(downloadSize)}  ${chalk.dim("(measured; TODO: fetch from ollama list)")}`
+    `${chalk.gray("Estimated download:")} ${chalk.white(`~${spec.downloadSizeGb} GB (approx.)`)}`
   );
   console.log(
-    `${chalk.gray("Estimated memory:  ")} ${chalk.white(ramEstimate)}    ${chalk.dim("(measured; TODO: fetch from ollama list)")}`
+    `${chalk.gray("Estimated memory:  ")} ${chalk.white(`~${spec.estimatedRamGb} GB (approx.)`)}`
   );
   console.log();
   console.log(

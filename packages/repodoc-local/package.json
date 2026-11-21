@@ -1,25 +1,43 @@
 {
   "name": "repodoc-local",
   "version": "0.1.0",
-  "description": "repoDoc Local — offline AI-powered repository analysis and bug-fix agent",
+  "description": "Local-first AI bug fixer and guardrails. Code never leaves your machine. Powered by Gemma 4.",
   "type": "module",
   "engines": {
     "node": ">=18"
   },
   "bin": {
-    "repodoc": "./dist/cli.js"
+    "repodoc": "dist/cli.js",
+    "repodoc-local": "dist/cli.js"
   },
-  "main": "./dist/cli.js",
-  "types": "./dist/cli.d.ts",
+  "main": "dist/cli.js",
+  "types": "dist/cli.d.ts",
   "files": [
     "dist",
+    "prompts",
+    "repodoc.example.yml",
     "README.md"
   ],
   "scripts": {
     "build": "tsc",
+    "prepublishOnly": "npm run build",
     "dev": "ts-node src/cli.ts",
     "test": "NODE_OPTIONS=--experimental-vm-modules jest"
   },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rusky-lms/repoDoc.git",
+    "directory": "packages/repodoc-local"
+  },
+  "keywords": [
+    "local-first",
+    "gemma",
+    "ollama",
+    "code-review",
+    "privacy",
+    "guardrails"
+  ],
   "dependencies": {
     "chalk": "^5.3.0",
     "commander": "^12.1.0",
@@ -37,18 +55,11 @@
   "jest": {
     "preset": "ts-jest/presets/default-esm",
     "testEnvironment": "node",
-    "extensionsToTreatAsEsm": [".ts"],
+    "extensionsToTreatAsEsm": [
+      ".ts"
+    ],
     "moduleNameMapper": {
       "^(\\.{1,2}/.*)\\.js$": "$1"
     }
-  },
-  "keywords": [
-    "repodoc",
-    "local",
-    "ai",
-    "code-analysis",
-    "ollama",
-    "cli"
-  ],
-  "license": "MIT"
+  }
 }
