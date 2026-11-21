@@ -73,9 +73,7 @@ class TestSettings:
 
     def test_save_settings(self):
         r = requests.post(f"{BASE_URL}/api/settings", json={
-            "github_token": "",
-            "telegram_bot_token": "",
-            "telegram_chat_id": ""
+            "github_token": ""
         })
         assert r.status_code == 200
         data = r.json()

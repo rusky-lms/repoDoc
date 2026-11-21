@@ -4,6 +4,7 @@ import re
 import json
 import shutil
 import sys
+import uuid
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -363,8 +364,101 @@ async def verify_fix_for_test(bug: dict, repo_dir: str, strategy: dict) -> bool:
     return True
 
 
+async def generate_gemini_summary(repo_name: str, bugs: list, fixes: list, llm_key: str) -> tuple[str, list]:
+    """Call Gemini once to produce:
+    1. A short summary of the issues found.
+    2. For each fix, a 'why this change' explanation.
+    If the call fails, fall back to the plain list of findings and never fail the analysis because of it.
+    """
+    if not bugs:
+        return "No issues or defects were detected in this repository.", fixes
+
+    fallback_summary = "Issues found:\n" + "\n".join(
+        f"- [{b.get('severity', 'warning').upper()}] {b.get('file', 'unknown')}: {b.get('description', '')}"
+        for b in bugs
+    )
+    for fix in fixes:
+        why = fix.get("explanation") or f"Automated fix addressing issue in {fix.get('file', '')}"
+        fix["why_this_change"] = why
+        fix["explanation"] = why
+
+    if not llm_key:
+        return fallback_summary, fixes
+
+    try:
+        bug_summaries = []
+        for i, b in enumerate(bugs):
+            bug_summaries.append(
+                f"Issue #{i+1} (ID: {b.get('id', i+1)}):\n"
+                f"  File: {b.get('file', 'unknown')}\n"
+                f"  Line: {b.get('line', 'N/A')}\n"
+                f"  Type: {b.get('type', 'bug')}\n"
+                f"  Severity: {b.get('severity', 'medium')}\n"
+                f"  Description: {b.get('description', '')}"
+            )
+
+        fix_summaries = []
+        for i, f in enumerate(fixes):
+            fix_summaries.append(
+                f"Fix #{i+1} (Bug ID: {f.get('bug_id', '')}, File: {f.get('file', '')}):\n"
+                f"  Diff:\n{f.get('diff', '')[:1000]}"
+            )
+
+        prompt = (
+            f"You are repoDoc, an autonomous AI code quality and bug fixing system. You just analyzed the repository: {repo_name}.\n\n"
+            f"Below are the issues found:\n"
+            + "\n".join(bug_summaries)
+            + "\n\nBelow are the proposed fixes and unified diffs:\n"
+            + "\n".join(fix_summaries)
+            + "\n\nIn ONE response, produce:\n"
+            "1. 'summary': A concise executive summary of the issues found (2 to 4 sentences).\n"
+            "2. 'fixes': A list corresponding to each fix, containing 'file' and 'why_this_change' (1 to 2 clear sentences explaining why this change was made and why it fixes the issue).\n\n"
+            "Output MUST be valid JSON only, without markdown code fences:\n"
+            '{"summary": "...", "fixes": [{"file": "...", "why_this_change": "..."}]}'
+        )
+
+        chat = LlmChat(
+            api_key=llm_key,
+            session_id=f"summary-{uuid.uuid4()}",
+            system_message="You are repoDoc code review and summary AI. You provide concise summaries and 'why this change' explanations for code fixes in JSON."
+        ).with_model("gemini", "gemini-3-flash-preview")
+
+        raw_reply = await chat.send_message(UserMessage(text=prompt))
+        cleaned = raw_reply.strip()
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+        data = json.loads(cleaned)
+        summary_text = data.get("summary") or fallback_summary
+        fix_exps = data.get("fixes") or []
+
+        for i, fix in enumerate(fixes):
+            matched_why = None
+            if i < len(fix_exps) and isinstance(fix_exps[i], dict):
+                matched_why = fix_exps[i].get("why_this_change")
+            if not matched_why:
+                for fe in fix_exps:
+                    if isinstance(fe, dict) and fe.get("file") == fix.get("file"):
+                        matched_why = fe.get("why_this_change")
+                        break
+            if matched_why:
+                fix["why_this_change"] = matched_why
+                fix["explanation"] = matched_why
+
+        return summary_text, fixes
+
+    except Exception as e:
+        logger.warning(f"Gemini summary generation failed: {e}. Falling back to plain findings.")
+        return fallback_summary, fixes
+
+
 async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
-                            telegram_svc=None, github_svc=None, telegram_chat_id: Optional[str] = None,
+                            github_svc=None,
                             target_branch: Optional[str] = None,
                             seed_bugs: Optional[list] = None,
                             watch_event_id: Optional[str] = None):
@@ -380,11 +474,6 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         entry = {"timestamp": utc_now(), "level": level, "message": msg}
         await db.analyses.update_one({"id": analysis_id}, {"$push": {"logs": entry}})
         logger.info(f"[{analysis_id[:8]}] {msg}")
-        if telegram_svc and telegram_chat_id:
-            try:
-                await telegram_svc.send_message(telegram_chat_id, msg)
-            except Exception:
-                pass
 
     async def update_step(step: str, status: str, message: str = ""):
         await db.analyses.update_one(
@@ -492,14 +581,13 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         await update_step("act", "completed", f"{len(bugs)} issue(s) found")
 
         if not bugs:
-            await add_log("No bugs found! Repository looks clean.")
+            summary = "No bugs found! Repository looks clean."
+            await add_log(summary)
             for step in ["verify", "create_pr"]:
                 await update_step(step, "skipped", "No bugs found")
             await db.analyses.update_one({"id": analysis_id}, {
-                "$set": {"status": "completed", "completed_at": utc_now()}
+                "$set": {"status": "completed", "completed_at": utc_now(), "summary": summary}
             })
-            if telegram_svc and telegram_chat_id:
-                await telegram_svc.send_message(telegram_chat_id, f"Analysis complete for {full_name}\nNo bugs found!")
             return
 
         # ── STEP 4: VERIFY ───────────────────────────────────────────────────
@@ -553,7 +641,15 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
         await update_step("verify", "completed", f"{verified_count}/{len(fixes)} fix(es) verified")
         await add_log(f"Verification complete: {verified_count} verified fixes")
 
-        # ── STEP 5: CREATE PR ─────────────────────────────────────────────────
+        # ── LLM SUMMARY & EXPLANATIONS ───────────────────────────────────────
+        await add_log("Generating Gemini summary and 'why this change' explanations...")
+        summary, fixes = await generate_gemini_summary(full_name, bugs, fixes, llm_key)
+        await db.analyses.update_one({"id": analysis_id}, {
+            "$set": {"summary": summary, "fixes": fixes}
+        })
+        await add_log(f"Summary: {summary}")
+
+        # ── STEP 5: CREATE PR & GITHUB ISSUE ──────────────────────────────────
         pr_url = None
         if github_svc and verified_count > 0:
             await update_step("create_pr", "active", "Creating GitHub PR...")
@@ -562,6 +658,7 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
                 pr_url = await github_svc.create_pr(
                     repo_url, repo_dir, analysis_id, fixes,
                     base_branch=target_branch,
+                    summary=summary,
                 )
                 await db.analyses.update_one({"id": analysis_id}, {"$set": {"pr_url": pr_url}})
                 await update_step("create_pr", "completed", pr_url)
@@ -580,17 +677,46 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
             await update_step("create_pr", "skipped", reason)
             await add_log(f"Skipping PR creation: {reason}")
 
+        # Create or link GitHub issue with summary and fix explanations
+        if github_svc and bugs:
+            try:
+                owner, repo = github_svc._parse_repo(repo_url)
+                short_id = analysis_id[:8]
+                issue_title = f"[repoDoc] Analysis Report: {len(bugs)} issue(s) detected [{short_id}]"
+                issue_lines = "\n".join(
+                    f"- **[{b.get('severity', 'warning').upper()}] {b.get('type', 'bug')}** in `{b.get('file', '?')}`: {b.get('description', '')}"
+                    for b in bugs[:10]
+                )
+                why_lines = "\n".join(
+                    f"- **`{f.get('file', '?')}`**: {f.get('why_this_change') or f.get('explanation', 'Fix applied')}"
+                    for f in fixes if f.get("verified")
+                )
+                issue_body = f"""## repoDoc Analysis Report
+
+### Summary of Issues Found
+{summary}
+
+### Findings ({len(bugs)})
+{issue_lines}
+
+### Proposed Fixes & "Why This Change" Explanations
+{why_lines if why_lines else "_No verified fixes generated._"}
+
+---
+*Generated autonomously by repoDoc [{short_id}].*
+"""
+                issue_url = await github_svc.create_issue(owner, repo, issue_title, issue_body, labels=["repodoc", "analysis"])
+                if issue_url:
+                    await db.analyses.update_one({"id": analysis_id}, {"$set": {"github_issue_url": issue_url}})
+                    await add_log(f"GitHub issue created: {issue_url}")
+            except Exception as e:
+                logger.warning(f"Failed to create GitHub issue: {e}")
+
         await db.analyses.update_one({"id": analysis_id}, {
-            "$set": {"status": "completed", "completed_at": utc_now(), "fixes": fixes}
+            "$set": {"status": "completed", "completed_at": utc_now(), "fixes": fixes, "summary": summary}
         })
         summary_msg = f"Analysis complete for {full_name}: {len(bugs)} bugs found, {verified_count} fixed"
         await add_log(summary_msg)
-
-        if telegram_svc and telegram_chat_id:
-            tg_msg = f"<b>Analysis Complete</b>\n\nRepo: <code>{full_name}</code>\nBugs found: {len(bugs)}\nFixes verified: {verified_count}"
-            if pr_url:
-                tg_msg += f"\nPR: {pr_url}"
-            await telegram_svc.send_message(telegram_chat_id, tg_msg)
 
     except Exception as e:
         logger.exception(f"Analysis {analysis_id} failed with exception")
@@ -604,7 +730,5 @@ async def run_analysis_task(analysis_id: str, repo_url: str, db, llm_key: str,
                 {"id": analysis_id, "agent_steps.step": step, "agent_steps.status": "active"},
                 {"$set": {"agent_steps.$.status": "failed"}}
             )
-        if telegram_svc and telegram_chat_id:
-            await telegram_svc.send_message(telegram_chat_id, f"Analysis failed: {str(e)[:200]}")
     finally:
         shutil.rmtree(repo_dir, ignore_errors=True)

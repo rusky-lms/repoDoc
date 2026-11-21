@@ -133,12 +133,18 @@ export default function History() {
                   <span className="text-sm font-mono text-white truncate block">
                     {analysis.repo_name || analysis.repo_url}
                   </span>
+                  {analysis.summary && (
+                    <p className="text-xs text-zinc-400 mt-1 line-clamp-2" title={analysis.summary}>
+                      <span className="text-emerald-400 font-mono text-[10px] uppercase mr-1">Summary:</span>
+                      {analysis.summary}
+                    </p>
+                  )}
                   {analysis.pr_url && (
                     <a
                       href={analysis.pr_url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="text-xs text-cyan-400 flex items-center gap-1 hover:text-cyan-300"
+                      className="text-xs text-cyan-400 flex items-center gap-1 hover:text-cyan-300 mt-1"
                       onClick={(e) => e.stopPropagation()}
                     >
                       <ExternalLink size={10} /> PR

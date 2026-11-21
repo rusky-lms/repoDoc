@@ -8,7 +8,6 @@ import { API } from "../lib/api";
 
 function AddRepoForm({ guardrails, onAdd }) {
   const [repoUrl, setRepoUrl] = useState("");
-  const [chatId, setChatId] = useState("");
   const [gid, setGid] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -20,10 +19,9 @@ function AddRepoForm({ guardrails, onAdd }) {
     try {
       await axios.post(`${API}/watched-repos`, {
         repo_url: repoUrl.trim(),
-        telegram_chat_id: chatId.trim(),
         guardrails_id: gid || null,
       });
-      setRepoUrl(""); setChatId(""); setGid("");
+      setRepoUrl(""); setGid("");
       onAdd();
     } catch (e) {
       setErr(e.response?.data?.detail || "Failed to add");
@@ -47,25 +45,18 @@ function AddRepoForm({ guardrails, onAdd }) {
           data-testid="watch-repo-url"
           className="w-full bg-[#0A0A0A] border border-zinc-800 text-white px-4 py-2.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
         />
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div>
           <select
             value={gid}
             onChange={(e) => setGid(e.target.value)}
             data-testid="watch-guardrails-select"
-            className="bg-[#0A0A0A] border border-zinc-800 text-white px-3 py-2.5 text-sm font-mono"
+            className="w-full bg-[#0A0A0A] border border-zinc-800 text-white px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
           >
             <option value="">— No guardrails (clean polling only) —</option>
             {guardrails.map((g) => (
               <option key={g.id} value={g.id}>{g.name} ({g.rules.length} rules)</option>
             ))}
           </select>
-          <input
-            value={chatId}
-            onChange={(e) => setChatId(e.target.value)}
-            placeholder="Telegram chat ID (optional)"
-            data-testid="watch-chat-id"
-            className="bg-[#0A0A0A] border border-zinc-800 text-white px-3 py-2.5 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
-          />
         </div>
         {err && <p className="text-red-400 text-xs font-mono">{err}</p>}
         <button

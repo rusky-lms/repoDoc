@@ -22,6 +22,7 @@ import {
 import { runAudit, checkNetwork } from "./security/audit.js";
 import { LocalLLM } from "./local-llm.js";
 import { runAgentLoop } from "./agent-loop.js";
+import { askQuestion, startChat } from "./followup.js";
 
 // ── Version & Banner ──────────────────────────────────────────────────────────
 
@@ -264,6 +265,9 @@ program
             `Patches Generated:  ${chalk.green(String(result.patches.length))}`
           );
         }
+        if (result.runId) {
+          console.log(`Run Saved:          ${chalk.white(`.repodoc/runs/${result.runId}.json`)}`);
+        }
         console.log();
       }
 
@@ -370,6 +374,78 @@ program
       console.log(chalk.hex("#A1A1AA")(`Please open ${liveUrl} in your browser.`));
     }
   });
+
+// ── repodoc ask <question> ───────────────────────────────────────────────────
+
+program
+  .command("ask <question>")
+  .description("ask a question grounded in a saved analysis run")
+  .option("--run <id>", "specific run ID to query (defaults to latest)")
+  .option("--repo <path>", "repository path", ".")
+  .addOption(
+    new Option("--model <tier>", "model tier to use")
+      .choices(["gemma-4-e4b", "gemma-4-e2b", "auto"])
+      .default("auto")
+  )
+  .option("--offline", "disable all network calls", false)
+  .option("--debug", "print prompt size, raw response, and done_reason", false)
+  .action(
+    async (
+      question: string,
+      options: { run?: string; repo: string; model: string; offline: boolean; debug: boolean }
+    ) => {
+      try {
+        const repoPath = path.resolve(process.cwd(), options.repo);
+        const answer = await askQuestion(question, {
+          repoPath,
+          runId: options.run,
+          model: options.model as ModelTier | "auto",
+          offline: options.offline,
+          debug: options.debug,
+        });
+        console.log();
+        console.log(chalk.white(answer));
+        console.log();
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(chalk.hex("#F87171")(`[error] ${msg}`));
+        process.exit(1);
+      }
+    }
+  );
+
+// ── repodoc chat ─────────────────────────────────────────────────────────────
+
+program
+  .command("chat")
+  .description("start an interactive chat session grounded in a saved analysis run")
+  .option("--run <id>", "specific run ID to query (defaults to latest)")
+  .option("--repo <path>", "repository path", ".")
+  .addOption(
+    new Option("--model <tier>", "model tier to use")
+      .choices(["gemma-4-e4b", "gemma-4-e2b", "auto"])
+      .default("auto")
+  )
+  .option("--offline", "disable all network calls", false)
+  .option("--debug", "print prompt size, raw response, and done_reason", false)
+  .action(
+    async (options: { run?: string; repo: string; model: string; offline: boolean; debug: boolean }) => {
+      try {
+        const repoPath = path.resolve(process.cwd(), options.repo);
+        await startChat({
+          repoPath,
+          runId: options.run,
+          model: options.model as ModelTier | "auto",
+          offline: options.offline,
+          debug: options.debug,
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(chalk.hex("#F87171")(`[error] ${msg}`));
+        process.exit(1);
+      }
+    }
+  );
 
 // ── Parse ─────────────────────────────────────────────────────────────────────
 

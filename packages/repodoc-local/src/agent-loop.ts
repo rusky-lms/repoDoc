@@ -8,7 +8,15 @@ import { LocalLLM } from "./local-llm.js";
 import { FileEntry, walkRepo } from "./file-walker.js";
 import { runGuardrails, BUILTIN_RULES, loadRepoDocYml } from "./guardrails.js";
 import { redactSecrets } from "./secret-redactor.js";
-import { AnalysisResult, BugFinding, Patch, ModelTier } from "./types.js";
+import {
+  AnalysisResult,
+  BugFinding,
+  Patch,
+  ModelTier,
+  Explanation,
+  RiskLevel,
+} from "./types.js";
+import { saveRun } from "./persistence.js";
 import fs from "fs";
 import path from "path";
 import { execSync } from "child_process";
@@ -316,6 +324,8 @@ export async function runAgentLoop(
 
     const singleFilePrompt = [
       `You are a strict code review assistant examining the file "${f.relativePath}".`,
+      `Never invent file names or lines that are not in this file context.`,
+      `Grounded strictly in the guardrail findings and code below, identify real bugs or defects in this file.`,
       ``,
       `## Guardrail Findings for this file:`,
       findingsSummary,
@@ -325,9 +335,18 @@ export async function runAgentLoop(
       f.content.slice(0, 16_000),
       `\`\`\``,
       ``,
-      `Identify real bugs, defects, or security issues in this file.`,
+      `For every bug:`,
+      `- id: short identifier (e.g. "bug-1")`,
+      `- file: MUST be "${f.relativePath}"`,
+      `- line: exact line number in this file where problem occurs (or null)`,
+      `- rule_id: matching guardrail rule ID if applicable, or null`,
+      `- what: concise statement of the problem (1–2 sentences)`,
+      `- why: 1–3 sentences explaining why the change fixes it, grounded ONLY in finding, rule and diff`,
+      `- risk: {"level": "low" | "medium" | "high", "check": "what developer should double-check"}`,
+      `- diff: unified diff patch fixing the bug`,
+      ``,
       `Respond with ONLY a JSON object in this format:`,
-      `{"bugs":[{"id":"bug-1","file":"${f.relativePath}","line":1,"description":"explanation of bug","confidence":0.9}]}`,
+      `{"bugs":[{"id":"bug-1","file":"${f.relativePath}","line":1,"rule_id":"no_eval","what":"...","why":"...","risk":{"level":"low","check":"..."},"diff":"..."}]}`,
       `If there are no bugs, respond with: {"bugs":[]}`,
     ].join("\n");
 
@@ -379,12 +398,43 @@ export async function runAgentLoop(
             (b): b is Record<string, unknown> =>
               typeof b === "object" && b !== null
           )
-          .map((b, idx) => ({
-            id: String(b["id"] ?? `bug-${bugs.length + idx + 1}`),
-            file: String(b["file"] ?? f.relativePath),
-            description: String(b["description"] ?? ""),
-            confidence: Number(b["confidence"] ?? 0.5),
-          }));
+          .map((b, idx) => {
+            const rawRisk =
+              typeof b["risk"] === "object" && b["risk"] !== null
+                ? (b["risk"] as Record<string, unknown>)
+                : {};
+            const riskLevel = ["low", "medium", "high"].includes(
+              String(rawRisk["level"])
+            )
+              ? (rawRisk["level"] as RiskLevel)
+              : "medium";
+            const riskCheck = String(
+              rawRisk["check"] ?? "Review proposed changes carefully"
+            );
+
+            const whatText = String(b["what"] || b["description"] || "");
+            const whyText = String(b["why"] || "Resolves identified defect.");
+
+            const explanation: Explanation = {
+              rule_id: b["rule_id"] ? String(b["rule_id"]) : undefined,
+              what: whatText,
+              why: whyText,
+              risk: {
+                level: riskLevel,
+                check: riskCheck,
+              },
+            };
+
+            return {
+              id: String(b["id"] ?? `bug-${bugs.length + idx + 1}`),
+              file: f.relativePath, // never invent file names!
+              line: typeof b["line"] === "number" ? b["line"] : undefined,
+              description: whatText,
+              confidence: Number(b["confidence"] ?? 0.8),
+              explanation,
+              _diff: typeof b["diff"] === "string" ? b["diff"] : undefined,
+            };
+          });
         bugs.push(...fileBugs);
       } else {
         invalidFiles.push(f.relativePath);
@@ -449,46 +499,56 @@ export async function runAgentLoop(
       fs.mkdirSync(patchDir, { recursive: true });
     }
 
-    for (const bug of bugs) {
-      // Find the file content for this bug
-      const targetFile = redactedFiles.find((f) => f.relativePath === bug.file);
-      const fileContent = targetFile?.content ?? "(file not found)";
+    for (const bug of bugs as (BugFinding & { _diff?: string })[]) {
+      let diffText = bug._diff ?? "";
 
-      const patchPrompt = [
-        `Here is the bug: ${bug.description}`,
-        ``,
-        `Here is the file (${bug.file}):`,
-        "```",
-        fileContent,
-        "```",
-        ``,
-        `Output ONLY a unified diff patch that fixes this bug. Do not include any explanation.`,
-      ].join("\n");
+      if (!diffText) {
+        // Find the file content for this bug
+        const targetFile = redactedFiles.find((f) => f.relativePath === bug.file);
+        const fileContent = targetFile?.content ?? "(file not found)";
 
-      if (opts.debug) {
-        console.log(
-          chalk.cyan(`\n[debug] Generating patch diff for ${bug.id} (${bug.file})`)
-        );
-      }
+        const patchPrompt = [
+          `Here is the bug: ${bug.description}`,
+          `Explanation: ${bug.explanation?.what ?? ""} Why: ${bug.explanation?.why ?? ""}`,
+          ``,
+          `Here is the file (${bug.file}):`,
+          "```",
+          fileContent,
+          "```",
+          ``,
+          `Output ONLY a unified diff patch that fixes this bug. Do not include any explanation.`,
+        ].join("\n");
 
-      let diffText = "";
-      try {
-        const patchResponse = await llm.complete(patchPrompt, { format: "" });
-        const diffMatch =
-          patchResponse.text.match(/```diff\s*([\s\S]+?)\s*```/) ??
-          patchResponse.text.match(/```\s*([\s\S]+?)\s*```/) ??
-          patchResponse.text.match(/(---[\s\S]+)/);
-        diffText = diffMatch?.[1] ?? patchResponse.text.trim();
         if (opts.debug) {
           console.log(
-            chalk.cyan(`[debug] done_reason: ${patchResponse.doneReason ?? "unknown"}`)
+            chalk.cyan(`\n[debug] Generating patch diff for ${bug.id} (${bug.file})`)
           );
-          console.log(chalk.cyan(`[debug] Raw diff response:\n${diffText}\n`));
         }
-      } catch (err) {
-        emit(onStep, "act", "error", `Patch generation failed for ${bug.id}: ${err}`);
-        patches.push({ bugId: bug.id, file: bug.file, diff: "", applied: false });
-        continue;
+
+        try {
+          const patchResponse = await llm.complete(patchPrompt, { format: "" });
+          const diffMatch =
+            patchResponse.text.match(/```diff\s*([\s\S]+?)\s*```/) ??
+            patchResponse.text.match(/```\s*([\s\S]+?)\s*```/) ??
+            patchResponse.text.match(/(---[\s\S]+)/);
+          diffText = diffMatch?.[1] ?? patchResponse.text.trim();
+          if (opts.debug) {
+            console.log(
+              chalk.cyan(`[debug] done_reason: ${patchResponse.doneReason ?? "unknown"}`)
+            );
+            console.log(chalk.cyan(`[debug] Raw diff response:\n${diffText}\n`));
+          }
+        } catch (err) {
+          emit(onStep, "act", "error", `Patch generation failed for ${bug.id}: ${err}`);
+          patches.push({
+            bugId: bug.id,
+            file: bug.file,
+            diff: "",
+            applied: false,
+            explanation: bug.explanation,
+          });
+          continue;
+        }
       }
 
       let applied = false;
@@ -511,7 +571,13 @@ export async function runAgentLoop(
         }
       }
 
-      patches.push({ bugId: bug.id, file: bug.file, diff: diffText, applied });
+      patches.push({
+        bugId: bug.id,
+        file: bug.file,
+        diff: diffText,
+        applied,
+        explanation: bug.explanation,
+      });
     }
 
     emit(
@@ -551,8 +617,69 @@ export async function runAgentLoop(
     }
   }
 
+  // Print generated patches with AI-generated explanations in CLI
+  if (!opts.json && patches.length > 0) {
+    console.log(chalk.bold.green("\n─── Generated Patches & Explanations ─────────────"));
+    for (const [idx, p] of patches.entries()) {
+      console.log();
+      console.log(
+        chalk.bold(
+          `Patch #${idx + 1}: ${chalk.cyan(p.bugId)} (${chalk.white(p.file)})` +
+            (p.applied ? chalk.green(" [applied]") : "")
+        )
+      );
+      if (p.explanation) {
+        console.log(chalk.cyan("  [AI-generated explanation]"));
+        if (p.explanation.rule_id) {
+          console.log(`    ${chalk.gray("Rule:")}  ${chalk.white(p.explanation.rule_id)}`);
+        }
+        console.log(`    ${chalk.gray("What:")}  ${chalk.white(p.explanation.what)}`);
+        console.log(`    ${chalk.gray("Why:")}   ${chalk.white(p.explanation.why)}`);
+        const riskColor =
+          p.explanation.risk.level === "low"
+            ? chalk.green
+            : p.explanation.risk.level === "high"
+            ? chalk.red
+            : chalk.yellow;
+        console.log(
+          `    ${chalk.gray("Risk:")}  ${riskColor(p.explanation.risk.level.toUpperCase())} — ${chalk.dim(p.explanation.risk.check)}`
+        );
+      }
+      if (p.diff) {
+        console.log(chalk.gray("  Diff preview:"));
+        const diffPreview = p.diff.split("\n").slice(0, 8).join("\n");
+        console.log(chalk.dim(diffPreview));
+      }
+    }
+    console.log(chalk.bold.green("──────────────────────────────────────────────────"));
+  }
+
   // Print summary
   const durationMs = Date.now() - startMs;
+
+  let runId: string | undefined;
+  try {
+    runId = saveRun(
+      repoPath,
+      {
+        repoPath,
+        model: opts.model,
+        guardrailFindings,
+        bugs,
+        patches,
+        durationMs,
+        llmError: !llmReachable ? (llmGeneralError ?? "LLM connection failed") : undefined,
+        llmResponseInvalid: hasInvalidResponse,
+        invalidFiles: hasInvalidResponse ? invalidFiles : undefined,
+      },
+      files.length
+    );
+  } catch (err) {
+    if (opts.debug) {
+      console.log(chalk.red(`[debug] Failed to save run: ${err}`));
+    }
+  }
+
   if (!opts.json) {
     console.log();
     console.log(chalk.bold.green("─── repoDoc Analysis Summary ────────────────────"));
@@ -595,6 +722,9 @@ export async function runAgentLoop(
       console.log(`  ${chalk.gray("Patches generated:")} ${chalk.white(patches.length)}`);
     }
     console.log(`  ${chalk.gray("Duration:")}         ${chalk.white(durationMs + "ms")}`);
+    if (runId) {
+      console.log(`  ${chalk.gray("Run saved:")}        ${chalk.white(`.repodoc/runs/${runId}.json`)}`);
+    }
     console.log(chalk.bold.green("──────────────────────────────────────────────────"));
     console.log();
   }
@@ -612,6 +742,7 @@ export async function runAgentLoop(
     bugs,
     patches,
     durationMs,
+    runId,
     llmError: !llmReachable ? (llmGeneralError ?? "LLM connection failed") : undefined,
     llmResponseInvalid: hasInvalidResponse,
     invalidFiles: hasInvalidResponse ? invalidFiles : undefined,

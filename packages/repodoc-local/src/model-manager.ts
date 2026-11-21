@@ -93,10 +93,10 @@ export async function ensureModel(
     chalk.bold(`Downloading ${chalk.cyan(spec.ollamaTag)} via Ollama...`)
   );
   console.log(
-    `  ${chalk.gray("Estimated download size:")} ${chalk.white(`~${spec.downloadSizeGb} GB`)}  ${chalk.dim("(measured; TODO: fetch from ollama list)")}`
+    `  ${chalk.gray("Estimated download size:")} ${chalk.white(`~${spec.downloadSizeGb} GB (approx.)`)}`
   );
   console.log(
-    `  ${chalk.gray("Estimated RAM required: ")} ${chalk.white(`~${spec.estimatedRamGb} GB`)}  ${chalk.dim("(measured; TODO: fetch from ollama list)")}`
+    `  ${chalk.gray("Estimated RAM required: ")} ${chalk.white(`~${spec.estimatedRamGb} GB (approx.)`)}`
   );
   console.log();
 

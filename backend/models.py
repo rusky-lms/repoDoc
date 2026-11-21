@@ -42,6 +42,7 @@ class Fix(BaseModel):
     fixed_code: str = ""
     diff: str = ""
     explanation: str = ""
+    why_this_change: str = ""
     verified: bool = False
 
 
@@ -76,7 +77,8 @@ class Analysis(BaseModel):
     pr_url: Optional[str] = None
     pr_branch: Optional[str] = None
     error: Optional[str] = None
-    telegram_chat_id: Optional[str] = None
+    summary: Optional[str] = None
+    github_issue_url: Optional[str] = None
     target_branch: Optional[str] = None   # branch to target for fix PR
     triggered_by: str = "manual"          # manual | watcher
     created_at: str = Field(default_factory=utc_now)
@@ -85,16 +87,20 @@ class Analysis(BaseModel):
 
 class AnalysisCreate(BaseModel):
     repo_url: str
-    telegram_chat_id: Optional[str] = None
+    model_config = {"extra": "ignore"}
+
+
+class AskRequest(BaseModel):
+    question: str
+    history: Optional[List[Dict[str, str]]] = None
 
 
 class Settings(BaseModel):
     id: str = "global"
     user_id: str = ""
     github_token: str = ""
-    telegram_bot_token: str = ""
-    telegram_chat_id: str = ""
     updated_at: str = Field(default_factory=utc_now)
+    model_config = {"extra": "ignore"}
 
 
 # ── Guardrails Models ─────────────────────────────────────────────────────────
@@ -129,7 +135,6 @@ class WatchedRepo(BaseModel):
     user_id: str = ""
     repo_url: str
     repo_name: str = ""
-    telegram_chat_id: str = ""
     guardrails_id: Optional[str] = None
     active: bool = True
     last_commits: Dict[str, str] = {}   # branch -> last_sha
@@ -137,6 +142,7 @@ class WatchedRepo(BaseModel):
     issues_count: int = 0
     created_at: str = Field(default_factory=utc_now)
     last_checked_at: Optional[str] = None
+    model_config = {"extra": "ignore"}
 
 
 class WatchEvent(BaseModel):
@@ -159,5 +165,5 @@ class WatchEvent(BaseModel):
 
 class WatchCreate(BaseModel):
     repo_url: str
-    telegram_chat_id: Optional[str] = None
     guardrails_id: Optional[str] = None
+    model_config = {"extra": "ignore"}

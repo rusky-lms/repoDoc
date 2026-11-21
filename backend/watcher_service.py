@@ -1,5 +1,5 @@
 """Continuous repo monitor: polls watched repos for new commits, evaluates guardrails,
-creates GitHub issues, sends Telegram alerts, and triggers fix PRs."""
+creates GitHub issues, and triggers fix PRs."""
 
 import asyncio
 import logging
@@ -32,19 +32,6 @@ def _format_violations_md(violations: list) -> str:
             line += f"\n    ```\n    {snippet}\n    ```"
         lines.append(line)
     return "\n".join(lines)
-
-
-def _format_violations_telegram(violations: list) -> str:
-    if not violations:
-        return ""
-    lines = []
-    for v in violations[:5]:
-        sev = v.get("severity", "warning").upper()
-        rule = v.get("rule_name", "rule")
-        file = v.get("file", "?")
-        lines.append(f"  • <b>[{sev}]</b> {rule} — <code>{file}</code>")
-    extra = f"\n  …and {len(violations)-5} more" if len(violations) > 5 else ""
-    return "\n".join(lines) + extra
 
 
 class WatcherService:
@@ -90,9 +77,7 @@ class WatcherService:
             return
             
         from github_service import GitHubService
-        from telegram_service import TelegramService
         github_svc = GitHubService(settings["github_token"])
-        telegram_svc = TelegramService(settings["telegram_bot_token"]) if settings.get("telegram_bot_token") else None
         
         try:
             owner, repo = github_svc._parse_repo(repo_url)
@@ -119,8 +104,6 @@ class WatcherService:
         if gid:
             guardrails = await db.guardrails.find_one({"id": gid}, {"_id": 0})
 
-        chat_id = watched.get("telegram_chat_id") or ""
-
         for b in branches:
             branch = b["name"]
             sha = b["sha"]
@@ -136,7 +119,6 @@ class WatcherService:
                     from models import Analysis
                     analysis = Analysis(
                         repo_url=repo_url,
-                        telegram_chat_id=chat_id or None,
                         target_branch=branch,
                         triggered_by="initial_scan",
                     )
@@ -148,7 +130,6 @@ class WatcherService:
                         target_branch=branch,
                         seed_bugs=None,
                         watch_event_id=None,
-                        telegram_chat_id=chat_id or None,
                     ))
                 continue
 
@@ -158,7 +139,7 @@ class WatcherService:
             # New commit on this branch — process it
             await self._process_commit(
                 watched, full_name, repo_url, owner, repo, branch, sha,
-                guardrails, db, github_svc, telegram_svc, agent_runner, llm_key, chat_id,
+                guardrails, db, github_svc, agent_runner, llm_key,
             )
             last_commits[branch] = sha
 
@@ -168,8 +149,8 @@ class WatcherService:
         )
 
     async def _process_commit(self, watched, full_name, repo_url, owner, repo,
-                              branch, sha, guardrails, db, github_svc, telegram_svc,
-                              agent_runner, llm_key, chat_id):
+                              branch, sha, guardrails, db, github_svc,
+                              agent_runner, llm_key):
         commit_data = await github_svc.get_commit(owner, repo, sha)
         if not isinstance(commit_data, dict) or "sha" not in commit_data:
             return
@@ -209,23 +190,6 @@ class WatcherService:
             logger.info(f"[watcher] {full_name}@{branch[:20]} {sha[:7]} clean")
             return
 
-        # Tell Telegram
-        if telegram_svc and chat_id:
-            tg_text = (
-                f"<b>repoDoc — Guardrail Alert</b>\n"
-                f"Repo: <code>{full_name}</code>\n"
-                f"Branch: <code>{branch}</code>\n"
-                f"Commit: <code>{sha[:8]}</code> by {author}\n"
-                f"Message: <i>{commit_msg[:120]}</i>\n\n"
-                f"Found <b>{len(violations)}</b> violation(s):\n"
-                f"{_format_violations_telegram(violations)}\n\n"
-                f"Auto-generating fix PR…"
-            )
-            try:
-                await telegram_svc.send_message(chat_id, tg_text)
-            except Exception:
-                pass
-
         # Create GitHub issue
         issue_body = (
             f"**repoDoc** detected guardrail violations in commit "
@@ -256,7 +220,6 @@ class WatcherService:
             from models import Analysis  # local import to avoid cycles
             analysis = Analysis(
                 repo_url=repo_url,
-                telegram_chat_id=chat_id or None,
                 target_branch=branch,
                 triggered_by="watcher",
             )
@@ -268,7 +231,6 @@ class WatcherService:
                 target_branch=branch,
                 seed_bugs=seed,
                 watch_event_id=event["id"],
-                telegram_chat_id=chat_id or None,
             ))
             await db.watch_events.update_one(
                 {"id": event["id"]}, {"$set": {"analysis_id": analysis.id}}

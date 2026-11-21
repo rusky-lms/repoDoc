@@ -28,6 +28,20 @@ export interface ModelSpec {
   downloadSizeGb: number;
 }
 
+// ── Explanations ─────────────────────────────────────────────────────────────
+
+export type RiskLevel = "low" | "medium" | "high";
+
+export interface Explanation {
+  rule_id?: string;
+  what: string;
+  why: string;
+  risk: {
+    level: RiskLevel;
+    check: string;
+  };
+}
+
 // ── Analysis Results ──────────────────────────────────────────────────────────
 
 export interface AnalysisResult {
@@ -37,9 +51,23 @@ export interface AnalysisResult {
   bugs: BugFinding[];
   patches: Patch[];
   durationMs: number;
+  runId?: string;
   llmError?: string;
   llmResponseInvalid?: boolean;
   invalidFiles?: string[];
+}
+
+export interface SavedRun {
+  id: string;
+  timestamp: string;
+  repoPath: string;
+  model: ModelTier;
+  guardrailFindings: GuardrailFinding[];
+  bugs: BugFinding[];
+  patches: Patch[];
+  durationMs: number;
+  filesScanned: number;
+  llmResponseInvalid?: boolean;
 }
 
 export interface GuardrailFinding {
@@ -54,8 +82,10 @@ export interface GuardrailFinding {
 export interface BugFinding {
   id: string;
   file: string;
+  line?: number;
   description: string;
   confidence: number;
+  explanation?: Explanation;
 }
 
 export interface Patch {
@@ -63,6 +93,7 @@ export interface Patch {
   file: string;
   diff: string;
   applied: boolean;
+  explanation?: Explanation;
 }
 
 // ── CLI Options ───────────────────────────────────────────────────────────────

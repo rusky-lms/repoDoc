@@ -16,11 +16,13 @@ import json
 import httpx
 from pathlib import Path
 from datetime import datetime, timezone
+import time
+import uuid
 from typing import List, Optional
 
-from models import Analysis, AnalysisCreate, Settings
+from models import Analysis, AnalysisCreate, Settings, AskRequest
 from agent import run_analysis_task
-from telegram_service import TelegramService
+from llm import LlmChat, UserMessage
 from github_service import GitHubService
 from watcher_service import WatcherService
 import guardrails_service as gs_mod
@@ -103,10 +105,8 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
 
 
 # Global services
-telegram_svc: Optional[TelegramService] = None
 github_svc: Optional[GitHubService] = None
 watcher_svc: Optional[WatcherService] = None
-_telegram_task = None
 _gh_comment_task = None
 _watcher_task = None
 _keepalive_task = None
@@ -146,33 +146,26 @@ async def keepalive_loop():
 
 
 async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional[str] = None,
-                        seed_bugs: Optional[list] = None, watch_event_id: Optional[str] = None,
-                        telegram_chat_id: Optional[str] = None):
+                        seed_bugs: Optional[list] = None, watch_event_id: Optional[str] = None):
     """Wrapper that injects current service refs into the agent."""
     analysis = await db.analyses.find_one({"id": analysis_id})
     user_id = analysis.get("user_id") if analysis else None
-    
-    local_tg = None
+
     local_gh = None
-    
+
     if user_id:
         settings = await db.settings.find_one({"user_id": user_id})
         if settings:
             from github_service import GitHubService
-            from telegram_service import TelegramService
             if settings.get("github_token"):
                 local_gh = GitHubService(settings["github_token"])
-            if settings.get("telegram_bot_token"):
-                local_tg = TelegramService(settings["telegram_bot_token"])
 
     await run_analysis_task(
         analysis_id=analysis_id,
         repo_url=repo_url,
         db=db,
         llm_key=get_llm_key(),
-        telegram_svc=local_tg,
         github_svc=local_gh,
-        telegram_chat_id=telegram_chat_id,
         target_branch=target_branch,
         seed_bugs=seed_bugs,
         watch_event_id=watch_event_id,
@@ -180,18 +173,17 @@ async def _agent_runner(analysis_id: str, repo_url: str, target_branch: Optional
 
 
 async def init_services():
-    global telegram_svc, github_svc, watcher_svc, _telegram_task, _gh_comment_task, _watcher_task
+    global github_svc, watcher_svc, _gh_comment_task, _watcher_task
     try:
         settings = await db.settings.find_one({"id": "global"})
         if not settings:
             # Fallback to the first user's settings
             settings = await db.settings.find_one({})
     except Exception as exc:
-        logger.warning("Skipping optional service initialization; MongoDB is not reachable: %s", exc)
+        logger.warning("Skipping optional service initialization; DB is not reachable: %s", exc)
         return
 
     gh_token = (settings or {}).get("github_token") or os.environ.get("GITHUB_TOKEN", "")
-    tg_token = (settings or {}).get("telegram_bot_token") or os.environ.get("TELEGRAM_BOT_TOKEN", "")
 
     if gh_token:
         github_svc = GitHubService(gh_token)
@@ -201,12 +193,6 @@ async def init_services():
                 github_svc.poll_pr_comments(db, get_llm_key())
             )
 
-    if tg_token and (_telegram_task is None or _telegram_task.done()):
-        telegram_svc = TelegramService(tg_token)
-        _telegram_task = asyncio.create_task(
-            telegram_svc.start_polling(db, trigger_analysis_from_telegram, llm_key=get_llm_key())
-        )
-
     # Start the continuous repo watcher (runs always; no-op if no watched repos)
     if watcher_svc is None:
         watcher_svc = WatcherService()
@@ -214,18 +200,6 @@ async def init_services():
         _watcher_task = asyncio.create_task(
             watcher_svc.start(db, _agent_runner, get_llm_key)
         )
-
-
-async def trigger_analysis_from_telegram(repo_url: str, chat_id: str):
-    analysis = Analysis(repo_url=repo_url, telegram_chat_id=chat_id)
-    doc = analysis.model_dump()
-    await db.analyses.insert_one(doc)
-    asyncio.create_task(run_analysis_task(
-        analysis.id, repo_url, db, get_llm_key(),
-        telegram_svc=telegram_svc,
-        github_svc=github_svc,
-        telegram_chat_id=chat_id,
-    ))
 
 
 @app.on_event("startup")
@@ -254,9 +228,7 @@ async def startup():
 
 @app.on_event("shutdown")
 async def shutdown():
-    global _telegram_task, _gh_comment_task, _watcher_task, _keepalive_task
-    if _telegram_task:
-        _telegram_task.cancel()
+    global _gh_comment_task, _watcher_task, _keepalive_task
     if _gh_comment_task:
         _gh_comment_task.cancel()
     if _watcher_task:
@@ -300,27 +272,20 @@ async def create_analysis(body: AnalysisCreate, current_user: dict = Depends(get
     analysis = Analysis(
         user_id=current_user["id"],
         repo_url=body.repo_url,
-        telegram_chat_id=body.telegram_chat_id,
     )
     doc = analysis.model_dump()
     await db.analyses.insert_one(doc)
 
     settings = await db.settings.find_one({"user_id": current_user["id"]})
-    local_tg = None
     local_gh = None
     if settings:
         from github_service import GitHubService
-        from telegram_service import TelegramService
         if settings.get("github_token"):
             local_gh = GitHubService(settings["github_token"])
-        if settings.get("telegram_bot_token"):
-            local_tg = TelegramService(settings["telegram_bot_token"])
 
     asyncio.create_task(run_analysis_task(
         analysis.id, body.repo_url, db, get_llm_key(),
-        telegram_svc=local_tg,
         github_svc=local_gh,
-        telegram_chat_id=body.telegram_chat_id,
     ))
 
     return {"id": analysis.id, "status": "queued", "message": "Analysis started"}
@@ -396,6 +361,130 @@ async def stream_logs(analysis_id: str, token: str = None):
     )
 
 
+# ── Follow-up Q&A Rate Limiter & Route ─────────────────────────────────────────
+
+_user_ask_history: dict[str, list[float]] = {}
+ASK_RATE_LIMIT = 10
+ASK_WINDOW_SECONDS = 60.0
+
+def check_ask_rate_limit(user_id: str):
+    now = time.time()
+    history = _user_ask_history.get(user_id, [])
+    history = [t for t in history if now - t < ASK_WINDOW_SECONDS]
+    if len(history) >= ASK_RATE_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Rate limit exceeded. Maximum {ASK_RATE_LIMIT} questions per minute. Please try again shortly."
+        )
+    history.append(now)
+    _user_ask_history[user_id] = history
+
+
+@api_router.post("/analyses/{analysis_id}/ask")
+async def ask_analysis_question(
+    analysis_id: str,
+    body: AskRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    question = (body.question or "").strip()
+    if not question:
+        raise HTTPException(status_code=400, detail="Question cannot be empty")
+
+    check_ask_rate_limit(current_user["id"])
+
+    analysis = await db.analyses.find_one({"id": analysis_id, "user_id": current_user["id"]}, {"_id": 0})
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+
+    repo_name = analysis.get("repo_name") or analysis.get("repo_url", "unknown")
+    summary = analysis.get("summary", "")
+    bugs = analysis.get("bugs", [])
+    fixes = analysis.get("fixes", [])
+
+    context_lines = [
+        f"Repository: {repo_name}",
+        f"Analysis Status: {analysis.get('status', 'unknown')}",
+    ]
+    if summary:
+        context_lines.append(f"\nStored Summary:\n{summary}")
+
+    if bugs:
+        context_lines.append(f"\nStored Findings ({len(bugs)}):")
+        for b in bugs:
+            context_lines.append(
+                f"- [{b.get('severity', 'medium')}] {b.get('type', 'bug')} in {b.get('file', '?')}:{b.get('line', '?')} - {b.get('description', '')}"
+            )
+    else:
+        context_lines.append("\nStored Findings: No bugs or issues found.")
+
+    if fixes:
+        context_lines.append(f"\nStored Fixes & Diff Explanations ({len(fixes)}):")
+        for f in fixes:
+            why = f.get("why_this_change") or f.get("explanation", "")
+            context_lines.append(
+                f"File: {f.get('file', '')}\nVerified: {f.get('verified', False)}\nExplanation: {why}"
+            )
+            diff = f.get("diff", "")
+            if diff:
+                context_lines.append(f"Diff:\n{diff[:1500]}")
+    else:
+        context_lines.append("\nStored Fixes: No fixes generated.")
+
+    context_str = "\n".join(context_lines)
+
+    history_lines = []
+    if body.history:
+        for turn in body.history[-6:]:
+            role = turn.get("role", "user")
+            content = turn.get("content", "")
+            history_lines.append(f"{role.capitalize()}: {content}")
+    history_str = ("\n\nRecent Conversation History:\n" + "\n".join(history_lines)) if history_lines else ""
+
+    prompt = f"""You are repoDoc AI assistant answering a follow-up question about this code analysis run.
+
+CRITICAL INSTRUCTIONS:
+1. Answer using ONLY the stored findings, diffs, explanations, and summary provided in the context below.
+2. Do NOT invent, assume, or fabricate any facts, files, lines of code, or fixes outside of this provided context.
+3. If the question cannot be answered using the stored findings, diffs, or explanations below, reply:
+   "I cannot answer this based on the stored findings and diffs for this analysis."
+4. Be concise, technical, and helpful.
+
+Context for Analysis {analysis_id}:
+{context_str}{history_str}
+
+User Question: {question}
+"""
+
+    llm_key = get_llm_key()
+    if not llm_key:
+        raise HTTPException(status_code=500, detail="LLM API key not configured")
+
+    try:
+        chat = LlmChat(
+            api_key=llm_key,
+            session_id=f"qa-{analysis_id}-{uuid.uuid4()}",
+            system_message="You are repoDoc Q&A assistant. You answer questions strictly grounded in the provided analysis findings, diffs, and explanations."
+        ).with_model("gemini", "gemini-3-flash-preview")
+        answer = await chat.send_message(UserMessage(text=prompt))
+        return {
+            "analysis_id": analysis_id,
+            "question": question,
+            "answer": answer.strip()
+        }
+    except Exception as e:
+        logger.error(f"Error in ask endpoint: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate answer: {str(e)}")
+
+
+@app.post("/analyses/{analysis_id}/ask")
+async def ask_analysis_question_root(
+    analysis_id: str,
+    body: AskRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    return await ask_analysis_question(analysis_id, body, current_user)
+
+
 # ── Stats Route ───────────────────────────────────────────────────────────────
 
 @api_router.get("/stats")
@@ -436,12 +525,11 @@ async def get_settings(current_user: dict = Depends(get_current_user)):
     if not doc:
         return Settings().model_dump()
     result = dict(doc)
+    result.pop("telegram_bot_token", None)
+    result.pop("telegram_chat_id", None)
     if result.get("github_token"):
         t = result["github_token"]
         result["github_token_masked"] = t[:4] + "****" + t[-4:] if len(t) > 8 else "****"
-    if result.get("telegram_bot_token"):
-        t = result["telegram_bot_token"]
-        result["telegram_bot_token_masked"] = t[:4] + "****" + t[-4:] if len(t) > 8 else "****"
     return result
 
 
@@ -450,6 +538,8 @@ async def save_settings(body: dict, current_user: dict = Depends(get_current_use
     import uuid
     body["user_id"] = current_user["id"]
     body["updated_at"] = datetime.now(timezone.utc).isoformat()
+    body.pop("telegram_bot_token", None)
+    body.pop("telegram_chat_id", None)
     
     # Avoid duplicate 'global' ID constraint violations from default frontend payload
     existing = await db.settings.find_one({"user_id": current_user["id"]})
@@ -465,7 +555,7 @@ async def save_settings(body: dict, current_user: dict = Depends(get_current_use
 
 @api_router.get("/health")
 async def health():
-    return {"status": "ok", "telegram": telegram_svc is not None, "github": github_svc is not None}
+    return {"status": "ok", "github": github_svc is not None}
 
 
 # ── Guardrails Routes ─────────────────────────────────────────────────────────
@@ -558,7 +648,6 @@ async def add_watched_repo(body: dict, current_user: dict = Depends(get_current_
     wr = WatchedRepo(
         user_id=current_user["id"],
         repo_url=body.get("repo_url", ""),
-        telegram_chat_id=body.get("telegram_chat_id", "") or "",
         guardrails_id=body.get("guardrails_id"),
     )
     if not wr.repo_url:

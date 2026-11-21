@@ -14,9 +14,8 @@ function SettingSection({ title, description, children }) {
 }
 
 export default function Settings() {
-  const [settings, setSettings] = useState({ github_token: "", telegram_bot_token: "", telegram_chat_id: "" });
+  const [settings, setSettings] = useState({ github_token: "" });
   const [showGH, setShowGH] = useState(false);
-  const [showTG, setShowTG] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState("");
@@ -32,8 +31,6 @@ export default function Settings() {
         const data = settingsRes.data;
         setSettings({
           github_token: data.github_token || "",
-          telegram_bot_token: data.telegram_bot_token || "",
-          telegram_chat_id: data.telegram_chat_id || "",
         });
         setHealth(healthRes.data);
       } catch (e) {
@@ -64,7 +61,7 @@ export default function Settings() {
     <div className="max-w-3xl mx-auto px-6 py-8">
       <div className="mb-8">
         <h1 className="text-3xl font-[Chivo] font-bold text-white">Settings</h1>
-        <p className="text-zinc-500 text-sm mt-1">Configure GitHub and Telegram integrations</p>
+        <p className="text-zinc-500 text-sm mt-1">Configure GitHub integration</p>
       </div>
 
       {/* Service status */}
@@ -73,10 +70,6 @@ export default function Settings() {
           <div className={`flex items-center gap-2 text-xs font-mono ${health.github ? "text-emerald-400" : "text-zinc-500"}`}>
             {health.github ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
             GitHub {health.github ? "connected" : "not configured"}
-          </div>
-          <div className={`flex items-center gap-2 text-xs font-mono ${health.telegram ? "text-emerald-400" : "text-zinc-500"}`}>
-            {health.telegram ? <CheckCircle size={12} /> : <AlertCircle size={12} />}
-            Telegram {health.telegram ? "connected" : "not configured"}
           </div>
         </div>
       )}
@@ -137,57 +130,6 @@ export default function Settings() {
             >
               Create Classic GitHub PAT (recommended) <ExternalLink size={10} />
             </a>
-          </div>
-        </SettingSection>
-
-        {/* Telegram Settings */}
-        <SettingSection
-          title="Telegram Bot"
-          description="Optional. Create a bot via @BotFather and paste the token here to receive live updates and trigger analyses from Telegram."
-        >
-          <div className="space-y-3">
-            <div>
-              <label className="block text-xs font-mono text-zinc-400 mb-1">Bot Token</label>
-              <div className="flex gap-2">
-                <input
-                  type={showTG ? "text" : "password"}
-                  value={settings.telegram_bot_token}
-                  onChange={(e) => setSettings((s) => ({ ...s, telegram_bot_token: e.target.value }))}
-                  placeholder="1234567890:ABCdefGHIjklMNOpqrSTUvwxYZ"
-                  className="flex-1 bg-[#0A0A0A] border border-zinc-800 text-white placeholder:text-zinc-600 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                  data-testid="telegram-token-input"
-                />
-                <button
-                  onClick={() => setShowTG(!showTG)}
-                  className="p-2 border border-zinc-800 text-zinc-500 hover:text-white transition-colors"
-                >
-                  {showTG ? <EyeOff size={14} /> : <Eye size={14} />}
-                </button>
-              </div>
-            </div>
-            <div>
-              <label className="block text-xs font-mono text-zinc-400 mb-1">
-                Default Chat ID <span className="text-zinc-600">(optional)</span>
-              </label>
-              <input
-                type="text"
-                value={settings.telegram_chat_id}
-                onChange={(e) => setSettings((s) => ({ ...s, telegram_chat_id: e.target.value }))}
-                placeholder="Your Telegram Chat ID"
-                className="w-full bg-[#0A0A0A] border border-zinc-800 text-white placeholder:text-zinc-600 px-3 py-2 text-sm font-mono focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                data-testid="telegram-chat-id-input"
-              />
-            </div>
-            <div className="bg-[#0A0A0A] border border-zinc-800 p-3">
-              <p className="text-xs font-mono text-zinc-400 mb-1">How to get your Bot Token:</p>
-              <ol className="text-xs font-mono text-zinc-500 space-y-0.5 list-decimal list-inside">
-                <li>Open Telegram and search for <span className="text-white">@BotFather</span></li>
-                <li>Send <span className="text-emerald-400">/newbot</span></li>
-                <li>Follow the prompts and copy the token</li>
-              </ol>
-              <p className="text-xs font-mono text-zinc-400 mt-2 mb-1">Telegram Commands:</p>
-              <code className="text-xs text-emerald-400">/analyze https://github.com/user/repo</code>
-            </div>
           </div>
         </SettingSection>
 
