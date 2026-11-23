@@ -108,7 +108,7 @@ export async function ensureModel(
     console.log(chalk.gray("Download cancelled."));
     console.log(
       chalk.dim(
-        "Prefer not to install? Use the live app: https://repodoc.app"
+        "Prefer not to install? Use the live app: https://repodocv1.onrender.com/guardrails"
       )
     );
     process.exit(0);

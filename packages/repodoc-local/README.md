@@ -107,8 +107,8 @@ repodoc model list
 repodoc model rm <tier>
 ```
 
-### `repodoc open-live`
-Opens the hosted live web app [https://repodoc.app](https://repodoc.app) in your default browser.
+### `repodoc --open-live` / `repodoc open-live`
+Opens the hosted live web app [https://repodocv1.onrender.com/guardrails](https://repodocv1.onrender.com/guardrails) in your default browser.
 
 ---
 
