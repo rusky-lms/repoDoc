@@ -1,8 +1,8 @@
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, status
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
 from fastapi.security import OAuth2PasswordRequestForm
 from auth import get_password_hash, verify_password, create_access_token, oauth2_scheme, ALGORITHM, SECRET_KEY
 from jose import JWTError, jwt
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
@@ -584,6 +584,80 @@ async def create_guardrails_from_preset(body: dict, current_user: dict = Depends
     doc = gr.model_dump()
     await db.guardrails.insert_one(dict(doc))
     return doc
+
+
+@api_router.post("/guardrails/generate-from-doc")
+async def generate_guardrails_from_doc(
+    request: Request,
+    current_user: dict = Depends(get_current_user),
+):
+    content_type = (request.headers.get("content-type") or "").lower()
+    content = ""
+    filename = "architecture.md"
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        upload = form.get("file")
+        if upload is None or not hasattr(upload, "read"):
+            raise HTTPException(status_code=400, detail="Missing 'file' upload in multipart form")
+        filename = getattr(upload, "filename", None) or "architecture.md"
+        ext = Path(filename).suffix.lower()
+        if ext and ext not in (".md", ".markdown", ".txt"):
+            raise HTTPException(status_code=400, detail="Only .md and .txt files are supported")
+        raw_bytes = await upload.read()
+        if len(raw_bytes) > 512 * 1024:
+            raise HTTPException(status_code=400, detail="Document exceeds 512 KB limit")
+        content = raw_bytes.decode("utf-8", errors="replace")
+    else:
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Expected JSON body {\"content\": \"...\"} or multipart file upload")
+        content = str(body.get("content") or "")
+        filename = str(body.get("filename") or "architecture.md")
+
+    if not content.strip():
+        raise HTTPException(status_code=400, detail="Document content is empty")
+
+    llm_key = get_llm_key()
+    if not llm_key:
+        raise HTTPException(status_code=500, detail="LLM API key not configured")
+
+    try:
+        rules = await gs_mod.generate_rules_from_doc(content, filename, llm_key)
+        return {"filename": filename, "rules": rules}
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=502, detail="Gemini returned invalid JSON while extracting rules")
+    except Exception as e:
+        logger.error(f"Error generating guardrails from doc: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to extract rules: {str(e)}")
+
+
+@api_router.get("/guardrails/export.yml")
+async def export_latest_guardrails_yaml(current_user: dict = Depends(get_current_user)):
+    docs = await db.guardrails.find({"user_id": current_user["id"]}, {"_id": 0}).sort("created_at", -1).to_list(1)
+    if not docs:
+        raise HTTPException(status_code=404, detail="No guardrails profile found to export")
+    yaml_text = gs_mod.serialize_guardrails_to_yaml(docs[0])
+    return Response(
+        content=yaml_text,
+        media_type="text/yaml; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="repodoc.yml"'},
+    )
+
+
+@api_router.get("/guardrails/{gid}/export.yml")
+async def export_guardrails_profile_yaml(gid: str):
+    """Export a specific guardrails profile by UUID as repodoc.yml (used by browser download and `repodoc rules pull <url>`)."""
+    doc = await db.guardrails.find_one({"id": gid}, {"_id": 0})
+    if not doc:
+        raise HTTPException(status_code=404, detail="Guardrails not found")
+    yaml_text = gs_mod.serialize_guardrails_to_yaml(doc)
+    return Response(
+        content=yaml_text,
+        media_type="text/yaml; charset=utf-8",
+        headers={"Content-Disposition": 'attachment; filename="repodoc.yml"'},
+    )
 
 
 @api_router.get("/guardrails")

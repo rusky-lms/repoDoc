@@ -6,7 +6,7 @@
 
 import { LocalLLM } from "./local-llm.js";
 import { FileEntry, walkRepo } from "./file-walker.js";
-import { runGuardrails, BUILTIN_RULES, loadRepoDocYml } from "./guardrails.js";
+import { runGuardrails, BUILTIN_RULES, resolveCustomRules } from "./guardrails.js";
 import { redactSecrets } from "./secret-redactor.js";
 import {
   AnalysisResult,
@@ -33,6 +33,8 @@ export interface AgentOptions {
   promptFile?: string;
   json: boolean;
   debug?: boolean;
+  /** Explicit custom ruleset (`--rules <path>`); defaults to <repo>/repodoc.yml */
+  rulesPath?: string;
 }
 
 export interface AgentStep {
@@ -278,8 +280,8 @@ export async function runAgentLoop(
     content: redactSecrets(f.content).redacted,
   }));
 
-  // Load custom + built-in rules
-  const customRules = loadRepoDocYml(repoPath);
+  // Load custom + built-in rules (--rules <path> wins over ./repodoc.yml)
+  const customRules = resolveCustomRules(repoPath, opts.rulesPath);
   const allRules = [...BUILTIN_RULES, ...customRules];
 
   // Run pattern-based guardrails (no LLM needed)

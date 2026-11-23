@@ -1,6 +1,6 @@
 {
   "name": "repodoc-local",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local-first AI bug fixer and guardrails. Code never leaves your machine. Powered by Gemma 4.",
   "type": "module",
   "engines": {
