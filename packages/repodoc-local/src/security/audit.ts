@@ -148,6 +148,18 @@ export async function runAudit(): Promise<void> {
       }
     }
 
+    console.log(chalk.bold("  Explicit opt-in config fetches (never run during code scans):"));
+    const rulesSyncPath = path.join(dist, "rules-sync.js");
+    if (fs.existsSync(rulesSyncPath)) {
+      console.log(
+        `  ${chalk.cyan("ℹ")} ${chalk.bold("rules-sync.js")}  ${chalk.gray("opt-in config-only GET via `repodoc rules pull <url>` (blocked by --offline; zero code egress)")}`
+      );
+    }
+    console.log(
+      `  ${chalk.green("✓")} ${chalk.bold("Code scan & doc compiler")}  ${chalk.gray("100% offline / localhost:11434 only (zero cloud egress)")}`
+    );
+    console.log();
+
     console.log(chalk.gray("  Network module legend:"));
     console.log(
       chalk.gray(

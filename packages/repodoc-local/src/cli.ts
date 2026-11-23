@@ -23,6 +23,9 @@ import { runAudit, checkNetwork } from "./security/audit.js";
 import { LocalLLM } from "./local-llm.js";
 import { runAgentLoop } from "./agent-loop.js";
 import { askQuestion, startChat } from "./followup.js";
+import { loadRulesFile } from "./guardrails.js";
+import { compileDocToYml } from "./rules-compiler.js";
+import { pullRules } from "./rules-sync.js";
 
 // ── Version & Banner ──────────────────────────────────────────────────────────
 
@@ -93,6 +96,7 @@ program
   .option("--audit", "run security audit of package network capabilities")
   .option("--check-network", "verify inference process network isolation")
   .option("--open-live", "open repoDoc live app in the default browser")
+  .option("--rules <path>", "custom guardrails YAML to use instead of ./repodoc.yml")
   .hook("preAction", async () => {
     if (!process.argv.includes("--json")) {
       printBanner();
@@ -136,6 +140,25 @@ program
     const runTests = Boolean(options.runTests);
     const json = Boolean(options.json);
     const debug = Boolean(options.debug);
+    const rulesPath = options.rules ? path.resolve(process.cwd(), options.rules) : undefined;
+
+    // Fail fast on an explicit but missing / invalid ruleset
+    if (rulesPath) {
+      try {
+        const custom = loadRulesFile(rulesPath);
+        if (!json) {
+          console.log(
+            chalk.hex("#A1A1AA")(
+              `Using custom rules: ${chalk.white(path.relative(process.cwd(), rulesPath) || rulesPath)} (${custom.length} rule(s))`
+            )
+          );
+        }
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(chalk.hex("#F87171")(`[error] ${msg}`));
+        process.exit(1);
+      }
+    }
 
     if (runTests && !json) {
       console.log(
@@ -219,6 +242,7 @@ program
           offline,
           json,
           debug,
+          rulesPath,
         }
       );
 
@@ -383,6 +407,110 @@ program
   .description("open repoDoc live app in the default browser")
   .action(() => {
     openLiveApp();
+  });
+
+// ── repodoc rules <sub-command> ───────────────────────────────────────────────
+
+const rulesCmd = program
+  .command("rules")
+  .description("manage guardrail rules (generate from ADR/LLD/HLD docs, pull team rules)");
+
+rulesCmd
+  .command("generate <file>")
+  .description("compile an ADR / LLD / HLD (.md/.txt) into repodoc.yml rules with the local model (offline)")
+  .option("--out <path>", "output YAML file (merged if it exists)", "repodoc.yml")
+  .addOption(
+    new Option("--model <tier>", "model tier to use")
+      .choices(["gemma-4-e4b", "gemma-4-e2b", "auto"])
+      .default("auto")
+  )
+  .option("--debug", "print prompt size, raw response, and done_reason", false)
+  .action(async (file: string, options: { out: string; model: string; debug: boolean }) => {
+    const docPath = path.resolve(process.cwd(), file);
+    const outPath = path.resolve(process.cwd(), options.out);
+    let model = options.model as ModelTier | "auto";
+    if (model === "auto") model = selectModel(await detectHardware());
+
+    const cached = await isModelCached(model);
+    if (!cached) {
+      console.error(
+        chalk.hex("#F87171")(
+          `[error] Model ${model} is not cached locally. Run \`repodoc model pull --model ${model}\` first.`
+        )
+      );
+      process.exit(1);
+    }
+    const llm = new LocalLLM({ model });
+    if (!(await llm.isAvailable())) {
+      console.error(chalk.hex("#F87171")("[error] Ollama is not reachable at http://localhost:11434 (ollama serve)."));
+      process.exit(1);
+    }
+
+    console.log(
+      chalk.hex("#A1A1AA")(
+        `Compiling ${chalk.white(path.basename(docPath))} → guardrails with ${chalk.green(model)} [local, zero egress]…`
+      )
+    );
+
+    try {
+      const res = await compileDocToYml(docPath, outPath, { llm, debug: options.debug });
+      console.log();
+      console.log(chalk.bold.green(`Extracted ${res.rules.length} rule(s) from ${path.basename(docPath)}`));
+      console.log(chalk.gray("────────────────────────────────────────"));
+      if (res.rules.length === 0) {
+        console.log(chalk.hex("#FACC15")("  No enforceable must / must-not rules were found in this document."));
+      }
+      for (const r of res.rules) {
+        const sev =
+          r.severity === "critical" ? chalk.red(r.severity) : r.severity === "warning" ? chalk.yellow(r.severity) : chalk.cyan(r.severity);
+        console.log(`  ${chalk.bold(r.id)}  ${sev}  ${chalk.dim(r.type)}`);
+        console.log(`    ${chalk.white(r.description)}`);
+        if (r.pattern) console.log(`    ${chalk.gray("pattern:")} ${chalk.dim(r.pattern)}`);
+      }
+      for (const w of res.warnings) console.log(chalk.hex("#FACC15")(`  ⚠ ${w}`));
+      console.log();
+      console.log(
+        `Saved ${chalk.white(res.totalRules)} rule(s) to ${chalk.white(path.relative(process.cwd(), res.outPath) || res.outPath)}` +
+          (res.existingRules ? chalk.dim(` (merged with ${res.existingRules} existing)`) : "")
+      );
+      console.log(chalk.dim("Review / edit the YAML before scanning, then run: repodoc . --rules " + options.out));
+      console.log();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(chalk.hex("#F87171")(`[error] ${msg}`));
+      process.exit(1);
+    }
+  });
+
+rulesCmd
+  .command("pull <url>")
+  .description("download a team ruleset (repodoc.yml) from a URL — config only, never sends code")
+  .option("--out <path>", "output YAML file", "repodoc.yml")
+  .option("--merge", "merge into the existing file instead of replacing it", false)
+  .option("--offline", "disable all network calls (rules pull will refuse)", false)
+  .action(async (url: string, options: { out: string; merge: boolean; offline: boolean }) => {
+    const outPath = path.resolve(process.cwd(), options.out);
+    try {
+      const res = await pullRules(url, { outPath, merge: options.merge, offline: options.offline });
+      console.log();
+      console.log(chalk.bold.green(`✓ Pulled ${res.rules.length} rule(s) from ${new URL(res.url).host}`));
+      console.log(chalk.gray("────────────────────────────────────────"));
+      for (const r of res.rules) {
+        console.log(`  ${chalk.bold(r.id)}  ${chalk.dim(`${r.severity} · ${r.type}`)}`);
+      }
+      console.log();
+      console.log(`Saved ${chalk.white(res.totalRules)} rule(s) to ${chalk.white(path.relative(process.cwd(), outPath) || outPath)}`);
+      console.log(
+        chalk.green(
+          "Rules are now stored locally. This was a config-only download — no code was sent, and all code scans remain 100% offline."
+        )
+      );
+      console.log();
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(chalk.hex("#F87171")(`[error] ${msg}`));
+      process.exit(1);
+    }
   });
 
 // ── repodoc ask <question> ───────────────────────────────────────────────────

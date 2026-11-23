@@ -12,7 +12,7 @@ import { LocalLLM } from "./local-llm.js";
 export interface GuardrailRule {
   id: string;
   name: string;
-  category: "security" | "quality" | "custom";
+  category: "security" | "quality" | "compliance" | "custom";
   description: string;
   type: "pattern" | "llm";
   pattern?: string; // for type=pattern
@@ -207,73 +207,198 @@ export async function runGuardrails(
   return findings;
 }
 
-// ── repodoc.yml custom rule loader ───────────────────────────────────────────
+// ── repodoc.yml schema: parse / serialize / validate ─────────────────────────
+//
+// Schema (shared with the hosted backend's export endpoint):
+//
+//   version: 1                      # optional
+//   name: "My ruleset"              # optional
+//   rules:
+//     - id: no_console_log          # required, [A-Za-z0-9_.-]
+//       name: 'No Console Logs'     # optional (defaults to id)
+//       category: quality           # security | quality | compliance | custom
+//       type: pattern               # pattern | llm
+//       pattern: 'console\.log\('   # required when type = pattern
+//       severity: warning           # critical | warning | info
+//       description: '...'
+//       enabled: true               # optional; `false` rules are skipped
+//
+// Strings may be bare, 'single-quoted' ('' escapes a quote) or
+// "double-quoted" (backslash escapes, YAML-style).
+
+export const VALID_SEVERITIES = ["critical", "warning", "info"] as const;
+export const VALID_TYPES = ["pattern", "llm"] as const;
+export const VALID_CATEGORIES = ["security", "quality", "compliance", "custom"] as const;
 
 interface RawYmlRule {
-  id?: string;
-  name?: string;
-  category?: string;
-  description?: string;
-  type?: string;
-  pattern?: string;
-  severity?: string;
+  [key: string]: string | undefined;
+}
+
+/** Decode a single YAML scalar (bare, single- or double-quoted). */
+function decodeScalar(raw: string): string {
+  const v = raw.trim();
+  if (v.length >= 2 && v.startsWith("'") && v.endsWith("'")) {
+    return v.slice(1, -1).replace(/''/g, "'");
+  }
+  if (v.length >= 2 && v.startsWith('"') && v.endsWith('"')) {
+    return v.slice(1, -1).replace(/\\(.)/g, (_m, ch: string) => {
+      switch (ch) {
+        case "n": return "\n";
+        case "t": return "\t";
+        case '"': return '"';
+        case "\\": return "\\";
+        case "/": return "/";
+        default: return "\\" + ch; // keep unknown escapes verbatim
+      }
+    });
+  }
+  // Bare scalar: strip trailing inline comment (" # ...")
+  return v.replace(/\s+#.*$/, "");
 }
 
 /**
- * Very lightweight "YAML" parser for the repodoc.yml format.
- * Supports only simple key: value pairs and a `rules:` list with indented items.
- * Falls back gracefully on any parse error.
+ * Lightweight parser for the repodoc.yml format (no external YAML dependency).
+ * Supports top-level `key: value` pairs and a `rules:` list of flat maps.
  */
-function parseRepodocYml(text: string): GuardrailRule[] {
+export function parseRepodocYml(text: string): GuardrailRule[] {
   const rules: GuardrailRule[] = [];
-  const lines = text.split("\n");
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
 
   let inRules = false;
-  let current: RawYmlRule = {};
+  let current: RawYmlRule | null = null;
 
   const flush = () => {
-    if (current.id) {
+    if (current && current.id && current.enabled !== "false") {
+      const type = (current.type === "regex" ? "pattern" : current.type) ?? (current.pattern ? "pattern" : "llm");
       rules.push({
         id: current.id,
         name: current.name ?? current.id,
         category: (current.category as GuardrailRule["category"]) ?? "custom",
         description: current.description ?? "",
-        type: (current.type as GuardrailRule["type"]) ?? "pattern",
+        type: type as GuardrailRule["type"],
         pattern: current.pattern,
         severity: (current.severity as GuardrailRule["severity"]) ?? "info",
       });
     }
-    current = {};
+    current = null;
   };
 
-  for (const raw of lines) {
-    const line = raw.trimEnd();
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, "");
+    if (!line.trim() || line.trim().startsWith("#")) continue;
 
-    if (/^rules\s*:/.test(line)) {
-      inRules = true;
+    // Top-level key (no indentation)
+    if (/^[A-Za-z_][\w-]*\s*:/.test(line)) {
+      flush();
+      inRules = /^rules\s*:/.test(line);
       continue;
     }
-
     if (!inRules) continue;
 
-    // A new list item
-    if (/^\s+-\s+id\s*:/.test(line)) {
+    // New list item: "  - key: value"
+    const item = line.match(/^\s*-\s+([A-Za-z_]\w*)\s*:\s*(.*)$/);
+    if (item) {
       flush();
-      const m = line.match(/id\s*:\s*(.+)/);
-      if (m) current.id = m[1].trim().replace(/^['"]|['"]$/g, "");
+      current = { [item[1]]: decodeScalar(item[2]) };
       continue;
     }
 
-    // Key: value under current item
-    const kv = line.match(/^\s+(\w+)\s*:\s*(.+)/);
-    if (kv) {
-      const key = kv[1] as keyof RawYmlRule;
-      const val = kv[2].trim().replace(/^['"]|['"]$/g, "");
-      (current as Record<string, string>)[key] = val;
+    // Continuation "    key: value"
+    const kv = line.match(/^\s+([A-Za-z_]\w*)\s*:\s*(.*)$/);
+    if (kv && current) {
+      current[kv[1]] = decodeScalar(kv[2]);
     }
   }
 
   flush();
+  return rules;
+}
+
+/** Encode a string as a YAML single-quoted scalar (safe for regex patterns). */
+function encodeScalar(v: string): string {
+  return `'${v.replace(/\n/g, " ").replace(/'/g, "''")}'`;
+}
+
+/** Serialize rules into repodoc.yml text that `parseRepodocYml` round-trips. */
+export function serializeRepodocYml(
+  rules: GuardrailRule[],
+  header: { name?: string; comment?: string } = {}
+): string {
+  const out: string[] = [];
+  out.push(`# ${header.comment ?? "repoDoc guardrail configuration"}`);
+  out.push("# Edit freely, then run: repodoc <path> (or repodoc <path> --rules <file>)");
+  out.push("version: 1");
+  if (header.name) out.push(`name: ${encodeScalar(header.name)}`);
+  out.push("rules:");
+  for (const r of rules) {
+    out.push(`  - id: ${r.id}`);
+    out.push(`    name: ${encodeScalar(r.name)}`);
+    out.push(`    category: ${r.category}`);
+    out.push(`    type: ${r.type}`);
+    if (r.type === "pattern" && r.pattern) out.push(`    pattern: ${encodeScalar(r.pattern)}`);
+    out.push(`    severity: ${r.severity}`);
+    out.push(`    description: ${encodeScalar(r.description ?? "")}`);
+  }
+  return out.join("\n") + "\n";
+}
+
+/**
+ * Validate rules against the repodoc.yml schema.
+ * Returns a list of human-readable errors (empty = valid).
+ */
+export function validateRules(rules: GuardrailRule[]): string[] {
+  const errors: string[] = [];
+  const seen = new Set<string>();
+  rules.forEach((r, i) => {
+    const where = `rules[${i}]${r.id ? ` (${r.id})` : ""}`;
+    if (!r.id || !/^[A-Za-z0-9_.-]+$/.test(r.id)) errors.push(`${where}: invalid or missing id`);
+    if (seen.has(r.id)) errors.push(`${where}: duplicate id`);
+    seen.add(r.id);
+    if (!(VALID_TYPES as readonly string[]).includes(r.type)) {
+      errors.push(`${where}: type must be one of ${VALID_TYPES.join(", ")}`);
+    }
+    if (!(VALID_SEVERITIES as readonly string[]).includes(r.severity)) {
+      errors.push(`${where}: severity must be one of ${VALID_SEVERITIES.join(", ")}`);
+    }
+    if (!(VALID_CATEGORIES as readonly string[]).includes(r.category)) {
+      errors.push(`${where}: category must be one of ${VALID_CATEGORIES.join(", ")}`);
+    }
+    if (r.type === "pattern") {
+      if (!r.pattern) {
+        errors.push(`${where}: pattern rules need a 'pattern'`);
+      } else {
+        try {
+          new RegExp(r.pattern.replace(/^\(\?i\)/, ""), "im");
+        } catch {
+          errors.push(`${where}: pattern is not a valid regular expression`);
+        }
+      }
+    }
+  });
+  return errors;
+}
+
+/** Merge rule lists by id; `incoming` replaces existing rules with the same id. */
+export function mergeRules(existing: GuardrailRule[], incoming: GuardrailRule[]): GuardrailRule[] {
+  const byId = new Map<string, GuardrailRule>();
+  for (const r of existing) byId.set(r.id, r);
+  for (const r of incoming) byId.set(r.id, r);
+  return Array.from(byId.values());
+}
+
+/**
+ * Load rules from an explicit YAML file (used by `--rules <path>`).
+ * Throws on a missing file or an invalid schema, because the user asked for it.
+ */
+export function loadRulesFile(filePath: string): GuardrailRule[] {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`Rules file not found: ${filePath}`);
+  }
+  const rules = parseRepodocYml(fs.readFileSync(filePath, "utf8"));
+  const errors = validateRules(rules);
+  if (errors.length > 0) {
+    throw new Error(`Invalid rules file ${filePath}:\n  - ${errors.join("\n  - ")}`);
+  }
   return rules;
 }
 
@@ -295,4 +420,13 @@ export function loadRepoDocYml(repoPath: string): GuardrailRule[] {
     console.warn("[guardrails] Failed to parse repodoc.yml:", err);
     return [];
   }
+}
+
+/**
+ * Resolve the custom rule set for a scan: an explicit `--rules <path>` wins,
+ * otherwise fall back to `<repoPath>/repodoc.yml`.
+ */
+export function resolveCustomRules(repoPath: string, rulesPath?: string): GuardrailRule[] {
+  if (rulesPath) return loadRulesFile(path.resolve(rulesPath));
+  return loadRepoDocYml(repoPath);
 }
