@@ -241,3 +241,100 @@ class TestFollowUpQA:
                 )
                 assert res.status_code == 200
                 assert res.json()["answer"] == "No changes were necessary."
+
+
+class TestAgentLoopUI:
+    """Tests verifying the agent loop step updates work correctly with DB persistence."""
+
+    def test_db_apply_set_positional_and_direct(self):
+        from db import _apply_set
+
+        doc = {
+            "id": "test-123",
+            "agent_steps": [
+                {"step": "observe", "status": "pending", "message": ""},
+                {"step": "decide", "status": "pending", "message": ""},
+                {"step": "act", "status": "pending", "message": ""},
+            ]
+        }
+
+        # Test positional update
+        _apply_set(
+            doc,
+            {"agent_steps.$.status": "active", "agent_steps.$.message": "Running..."},
+            {"id": "test-123", "agent_steps.step": "decide"}
+        )
+
+        assert doc["agent_steps"][1]["status"] == "active"
+        assert doc["agent_steps"][1]["message"] == "Running..."
+        assert doc["agent_steps"][0]["status"] == "pending"
+
+        # Test full array update
+        updated_steps = [
+            {"step": "observe", "status": "completed", "message": "done"},
+            {"step": "decide", "status": "completed", "message": "done"},
+            {"step": "act", "status": "completed", "message": "done"},
+        ]
+        _apply_set(doc, {"agent_steps": updated_steps}, {"id": "test-123"})
+        assert doc["agent_steps"][0]["status"] == "completed"
+        assert doc["agent_steps"][2]["status"] == "completed"
+
+    def test_run_analysis_agent_steps_progression(self):
+        from agent import run_analysis_task
+
+        fake_analysis = {
+            "id": "analysis-prog-1",
+            "repo_url": "https://github.com/test/repo",
+            "agent_steps": [
+                {"step": "observe", "label": "Observe", "status": "pending"},
+                {"step": "decide", "label": "Decide", "status": "pending"},
+                {"step": "act", "label": "Act", "status": "pending"},
+                {"step": "verify", "label": "Verify", "status": "pending"},
+                {"step": "create_pr", "label": "Create PR", "status": "pending"},
+            ],
+            "status": "queued",
+            "logs": [],
+            "bugs": [],
+            "fixes": []
+        }
+
+        class MockAnalyses:
+            def __init__(self, doc):
+                self.doc = doc
+
+            async def find_one(self, query, projection=None):
+                return self.doc
+
+            async def update_one(self, query, update, upsert=False):
+                if "$set" in update:
+                    self.doc.update(update["$set"])
+                if "$push" in update:
+                    for k, v in update["$push"].items():
+                        self.doc.setdefault(k, []).append(v)
+                return True
+
+        class MockDb:
+            def __init__(self, doc):
+                self.analyses = MockAnalyses(doc)
+
+        mock_db = MockDb(fake_analysis)
+
+        with patch("agent.run_cmd", AsyncMock(return_value=(0, "test", ""))):
+            with patch("agent.build_file_map", return_value={"total_files": 10, "language": "python", "has_requirements": False}):
+                with patch("agent.decide_strategy", return_value={"language": "python", "test_cmd": None, "lint_cmd": None}):
+                    asyncio.run(run_analysis_task(
+                        analysis_id="analysis-prog-1",
+                        repo_url="https://github.com/test/repo",
+                        db=mock_db,
+                        llm_key="fake-key"
+                    ))
+
+        # Check that steps were properly transitioned from 'pending'
+        steps_by_name = {s["step"]: s for s in fake_analysis["agent_steps"]}
+        assert steps_by_name["observe"]["status"] == "completed"
+        assert steps_by_name["decide"]["status"] == "completed"
+        assert steps_by_name["act"]["status"] == "completed"
+        assert steps_by_name["verify"]["status"] == "skipped"  # skipped because 0 bugs
+        assert steps_by_name["create_pr"]["status"] == "skipped"
+        assert fake_analysis["status"] == "completed"
+

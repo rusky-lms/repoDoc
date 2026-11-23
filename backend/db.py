@@ -52,7 +52,17 @@ def parse_query(query: dict) -> tuple[str, list]:
                 conditions.append(f"(doc->>'{k}')::numeric = ${len(params)}")
             else:
                 params.append(v)
-                conditions.append(f"doc->>'{k}' = ${len(params)}")
+                if k in ("id", "_id"):
+                    conditions.append(f"(id = ${len(params)} OR doc->>'id' = ${len(params)})")
+                elif "." in k:
+                    parts = k.split(".")
+                    if len(parts) == 2:
+                        arr_name, field_name = parts
+                        conditions.append(f"((jsonb_typeof(doc->'{arr_name}') = 'array' AND EXISTS (SELECT 1 FROM jsonb_array_elements(doc->'{arr_name}') elem WHERE elem->>'{field_name}' = ${len(params)})) OR doc->'{arr_name}'->>'{field_name}' = ${len(params)})")
+                    else:
+                        conditions.append(f"doc->>'{k}' = ${len(params)}")
+                else:
+                    conditions.append(f"doc->>'{k}' = ${len(params)}")
     return " AND ".join(conditions), params
 class Cursor:
     def __init__(self, collection, query, projection=None):
@@ -96,6 +106,38 @@ class UpdateResult:
     def __init__(self, matched_count, modified_count=0):
         self.matched_count = matched_count
         self.modified_count = modified_count
+def _apply_set(doc: dict, set_dict: dict, query: dict):
+    for k, v in set_dict.items():
+        if ".$." in k:
+            arr_name, field_name = k.split(".$.", 1)
+            arr = doc.get(arr_name)
+            if isinstance(arr, list):
+                matched = False
+                for qk, qv in query.items():
+                    if qk.startswith(f"{arr_name}."):
+                        match_prop = qk.split(".", 1)[1]
+                        for item in arr:
+                            if isinstance(item, dict) and item.get(match_prop) == qv:
+                                item[field_name] = v
+                                matched = True
+                                break
+                if not matched:
+                    for item in arr:
+                        if isinstance(item, dict) and item.get("status") == "active":
+                            item[field_name] = v
+                            break
+        elif "." in k:
+            parts = k.split(".")
+            curr = doc
+            for p in parts[:-1]:
+                if p not in curr or not isinstance(curr[p], dict):
+                    curr[p] = {}
+                curr = curr[p]
+            curr[parts[-1]] = v
+        else:
+            doc[k] = v
+
+
 class PgCollection:
     def __init__(self, db, name):
         self.db = db
@@ -167,7 +209,7 @@ class PgCollection:
             return UpdateResult(1, 1)
         elif doc:
             if "$set" in update:
-                doc.update(update["$set"])
+                _apply_set(doc, update["$set"], query)
             if "$push" in update:
                 for k, v in update["$push"].items():
                     doc.setdefault(k, []).append(v)
@@ -180,7 +222,7 @@ class PgCollection:
         docs = await cursor.to_list()
         for doc in docs:
             if "$set" in update:
-                doc.update(update["$set"])
+                _apply_set(doc, update["$set"], query)
             if "$push" in update:
                 for k, v in update["$push"].items():
                     doc.setdefault(k, []).append(v)

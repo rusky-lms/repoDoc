@@ -105,6 +105,7 @@ export interface CliOptions {
   runTests: boolean;
   json: boolean;
   debug?: boolean;
+  openLive?: boolean;
 }
 
 // ── Network Check ─────────────────────────────────────────────────────────────

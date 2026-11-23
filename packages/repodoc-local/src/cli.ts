@@ -27,6 +27,23 @@ import { askQuestion, startChat } from "./followup.js";
 // ── Version & Banner ──────────────────────────────────────────────────────────
 
 const VERSION = "0.1.0";
+const LIVE_URL = "https://repodocv1.onrender.com/guardrails";
+
+function openLiveApp(): void {
+  console.log(chalk.green(`Opening ${LIVE_URL} ...`));
+  const platform = process.platform;
+  try {
+    if (platform === "darwin") {
+      execSync(`open ${LIVE_URL}`);
+    } else if (platform === "win32") {
+      execSync(`start ${LIVE_URL}`);
+    } else {
+      execSync(`xdg-open ${LIVE_URL} >/dev/null 2>&1 &`);
+    }
+  } catch {
+    console.log(chalk.hex("#A1A1AA")(`Please open ${LIVE_URL} in your browser.`));
+  }
+}
 
 function printBanner(): void {
   console.log(chalk.green(`repoDoc Local v${VERSION}`));
@@ -39,7 +56,7 @@ async function maybeShowLiveAppHint(): Promise<void> {
     if (!hasE4B && !hasE2B) {
       console.log(
         chalk.hex("#71717A")(
-          "Prefer not to install? Use the live app: https://repodoc.app"
+          `Prefer not to install? Use the live app: ${LIVE_URL}`
         )
       );
     }
@@ -75,6 +92,7 @@ program
   .option("--check-hardware", "print hardware info and recommended model, then exit")
   .option("--audit", "run security audit of package network capabilities")
   .option("--check-network", "verify inference process network isolation")
+  .option("--open-live", "open repoDoc live app in the default browser")
   .hook("preAction", async () => {
     if (!process.argv.includes("--json")) {
       printBanner();
@@ -102,6 +120,11 @@ program
 
     if (options.audit) {
       await runAudit();
+      return;
+    }
+
+    if (options.openLive) {
+      openLiveApp();
       return;
     }
 
@@ -359,20 +382,7 @@ program
   .command("open-live")
   .description("open repoDoc live app in the default browser")
   .action(() => {
-    const liveUrl = "https://repodoc.app";
-    console.log(chalk.green(`Opening ${liveUrl} ...`));
-    const platform = process.platform;
-    try {
-      if (platform === "darwin") {
-        execSync(`open ${liveUrl}`);
-      } else if (platform === "win32") {
-        execSync(`start ${liveUrl}`);
-      } else {
-        execSync(`xdg-open ${liveUrl} >/dev/null 2>&1 &`);
-      }
-    } catch {
-      console.log(chalk.hex("#A1A1AA")(`Please open ${liveUrl} in your browser.`));
-    }
+    openLiveApp();
   });
 
 // ── repodoc ask <question> ───────────────────────────────────────────────────
